@@ -184,26 +184,26 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
       // Helper: build record object for a subset of picks
       const buildRecord = (picks: any[]) => ({
-        wins:   picks.filter(p => p.result === 'win').length,
-        losses: picks.filter(p => p.result === 'loss').length,
-        pushes: picks.filter(p => p.result === 'push').length,
+        wins:   picks.filter((p: any) => p.result === 'win').length,
+        losses: picks.filter((p: any) => p.result === 'loss').length,
+        pushes: picks.filter((p: any) => p.result === 'push').length,
         total:  picks.length,
       });
 
       // Season-to-date (current season)
-      const seasonPicks = allPicks.filter(p => p.season === currentYear);
-      const nfl = allPicks.filter(p => p.league === 'NFL');
-      const cfb = allPicks.filter(p => p.league === 'CFB');
-      const nflSeason = seasonPicks.filter(p => p.league === 'NFL');
-      const cfbSeason = seasonPicks.filter(p => p.league === 'CFB');
+      const seasonPicks = allPicks.filter((p: any) => p.season === currentYear);
+      const nfl = allPicks.filter((p: any) => p.league === 'NFL');
+      const cfb = allPicks.filter((p: any) => p.league === 'CFB');
+      const nflSeason = seasonPicks.filter((p: any) => p.league === 'NFL');
+      const cfbSeason = seasonPicks.filter((p: any) => p.league === 'CFB');
 
       // Season-by-season breakdown
       const allSeasons = Array.from(new Set(allPicks.map((p: any) => p.season))).sort((a: any, b: any) => b - a);
       const bySeasonNfl: Record<number, any> = {};
       const bySeasonCfb: Record<number, any> = {};
       for (const s of allSeasons as number[]) {
-        bySeasonNfl[s] = buildRecord(allPicks.filter(p => p.league === 'NFL' && p.season === s));
-        bySeasonCfb[s] = buildRecord(allPicks.filter(p => p.league === 'CFB' && p.season === s));
+        bySeasonNfl[s] = buildRecord(allPicks.filter((p: any) => p.league === 'NFL' && p.season === s));
+        bySeasonCfb[s] = buildRecord(allPicks.filter((p: any) => p.league === 'CFB' && p.season === s));
       }
 
       return res.status(200).json({
