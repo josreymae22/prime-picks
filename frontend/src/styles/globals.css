@@ -1,0 +1,117 @@
+@import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=IBM+Plex+Sans:wght@300;400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap');
+
+:root {
+  --font-display: 'Bebas Neue';
+  --font-body: 'IBM Plex Sans';
+  --font-mono: 'IBM Plex Mono';
+}
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html {
+  background: #030B14;
+  color: #F0EEE6;
+}
+
+body {
+  font-family: var(--font-body), sans-serif;
+  background: #030B14;
+  min-height: 100vh;
+}
+
+/* Field lines background texture */
+.field-bg {
+  background-color: #030B14;
+  background-image:
+    repeating-linear-gradient(
+      90deg,
+      transparent,
+      transparent 59px,
+      rgba(26, 74, 46, 0.08) 59px,
+      rgba(26, 74, 46, 0.08) 60px
+    ),
+    repeating-linear-gradient(
+      180deg,
+      transparent,
+      transparent 59px,
+      rgba(26, 74, 46, 0.05) 59px,
+      rgba(26, 74, 46, 0.05) 60px
+    );
+}
+
+.score-display {
+  font-family: var(--font-display), serif;
+  letter-spacing: 0.05em;
+}
+
+.panel {
+  background: rgba(7, 21, 36, 0.85);
+  border: 1px solid rgba(201, 168, 76, 0.15);
+  backdrop-filter: blur(12px);
+}
+
+.panel-bright {
+  background: rgba(15, 44, 71, 0.6);
+  border: 1px solid rgba(201, 168, 76, 0.25);
+}
+
+.gold-line {
+  background: linear-gradient(90deg, transparent, #C9A84C, transparent);
+  height: 1px;
+  width: 100%;
+}
+
+input, select {
+  background: rgba(7, 21, 36, 0.9) !important;
+  border: 1px solid rgba(201, 168, 76, 0.2) !important;
+  color: #F0EEE6 !important;
+  font-family: var(--font-body), sans-serif !important;
+}
+
+input:focus, select:focus {
+  outline: none !important;
+  border-color: rgba(201, 168, 76, 0.6) !important;
+  box-shadow: 0 0 0 2px rgba(201, 168, 76, 0.1) !important;
+}
+
+option {
+  background: #071524;
+  color: #F0EEE6;
+}
+
+.win-prob-bar {
+  height: 6px;
+  border-radius: 3px;
+  background: linear-gradient(90deg, #D94040, #C9A84C, #3DAA6A);
+}
+
+@keyframes fadeUp {
+  from { opacity: 0; transform: translateY(16px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.animate-fade-up {
+  animation: fadeUp 0.4s ease forwards;
+}
+
+@keyframes pulse-gold {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+.animate-pulse-gold {
+  animation: pulse-gold 1.5s ease infinite;
+}
+
+.confidence-band {
+  background: rgba(201, 168, 76, 0.06);
+  border-left: 2px solid rgba(201, 168, 76, 0.3);
+}
