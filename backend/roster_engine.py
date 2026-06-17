@@ -3,13 +3,30 @@ roster_engine.py
 Manages team rosters and positional group ratings using Firestore.
 """
 
+import os
 import logging
 from typing import Optional
 from datetime import datetime
 
-from firebase_admin import firestore
+import firebase_admin
+from firebase_admin import credentials, firestore
 
 logger = logging.getLogger(__name__)
+
+# ─────────────────────────────────────────────
+# Firebase Admin Init
+# ─────────────────────────────────────────────
+
+if not firebase_admin._apps:
+    cred = credentials.Certificate({
+        "type": "service_account",
+        "project_id": os.getenv("FIREBASE_PROJECT_ID"),
+        "private_key": os.getenv("FIREBASE_PRIVATE_KEY", "").replace("\\n", "\n"),
+        "client_email": os.getenv("FIREBASE_CLIENT_EMAIL"),
+        "token_uri": "https://oauth2.googleapis.com/token",
+    })
+
+    firebase_admin.initialize_app(cred)
 
 db = firestore.client()
 
@@ -49,7 +66,6 @@ def _slugify(value: str) -> str:
 
 class RosterEngine:
     def reload(self):
-        # Firestore is live, no local reload needed.
         return None
 
     def _team_ref(self, team_name: str):
@@ -124,7 +140,7 @@ class RosterEngine:
 
         self._player_ref(player_id).set(player)
 
-        team_doc = self._team_ref(team).get().to_dict()
+        team_doc = self._team_ref(team).get().to_dict() or {}
         groups = team_doc.get("groups", {g: {"rating": 50.0, "players": []} for g in POSITION_GROUPS})
 
         if position_group in groups:
@@ -178,7 +194,7 @@ class RosterEngine:
                 "updated_at": _now_iso(),
             })
 
-        new_team_doc = self._team_ref(new_team).get().to_dict()
+        new_team_doc = self._team_ref(new_team).get().to_dict() or {}
         new_groups = new_team_doc.get("groups", {g: {"rating": 50.0, "players": []} for g in POSITION_GROUPS})
 
         if old_group in new_groups:
