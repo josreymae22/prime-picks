@@ -45,15 +45,18 @@ const IMPACT_GUIDE = [
 ];
 
 type Player = {
+  id?: string;
   player_id: string;
   name: string;
   team: string;
   position_group: string;
   impact_score: number;
-  notes: string;
+  notes?: string;
   league: string;
 };
+
 type Move = {
+  id?: string;
   player_name: string;
   from_team: string;
   to_team: string;
@@ -61,10 +64,15 @@ type Move = {
   impact_score: number;
   move_type: string;
   timestamp: string;
-  notes: string;
+  notes?: string;
 };
+
 type RosterStatus = {
-  db_stats: { teams: number; players: number; moves_logged: number };
+  db_stats: {
+    teams: number;
+    players: number;
+    moves_logged: number;
+  };
   data_sources: {
     active_source: string;
     sportsdata_io: boolean;
@@ -90,64 +98,104 @@ export default function RosterPage() {
   const [searchQ, setSearchQ] = useState("");
   const [searchResults, setSearchResults] = useState<Player[]>([]);
 
-  // Add player form
   const [addForm, setAddForm] = useState<Record<string, string>>({});
-  // Transfer form
   const [xferPlayerId, setXferPlayerId] = useState("");
   const [xferTeam, setXferTeam] = useState("");
   const [xferType, setXferType] = useState("trade");
   const [xferNotes, setXferNotes] = useState("");
 
   useEffect(() => {
-    if (!authLoading && (!user || userStatus !== "approved"))
+    if (!authLoading && (!user || userStatus !== "approved")) {
       router.replace("/login");
+    }
   }, [user, userStatus, authLoading, router]);
-
-  useEffect(() => {
-    axios
-      .get(`${API}/roster/status`)
-      .then((r) => setStatus(r.data))
-      .catch(() => {});
-  }, []);
 
   const showToast = (msg: string) => {
     setToast(msg);
     setTimeout(() => setToast(""), 3500);
   };
 
+  const loadStatus = useCallback(async () => {
+    try {
+      const r = await axios.get(`${API}/roster/status`);
+      setStatus(r.data);
+    } catch {
+      // Keep page usable if status fails.
+    }
+  }, []);
+
+  const loadPlayers = useCallback(async () => {
+    try {
+      const r = await axios.get(`${API}/roster/players`);
+      const data = r.data;
+      setPlayers(Array.isArray(data) ? data : data.players || []);
+    } catch {
+      setPlayers([]);
+    }
+  }, []);
+
+  const loadMoves = useCallback(async () => {
+    try {
+      const r = await axios.get(`${API}/roster/moves`);
+      const data = r.data;
+      setMoves(Array.isArray(data) ? data : data.moves || []);
+    } catch {
+      setMoves([]);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadStatus();
+    loadPlayers();
+    loadMoves();
+  }, [loadStatus, loadPlayers, loadMoves]);
+
   const handleAuth = async () => {
     try {
       const r = await axios.get(`${API}/roster/players`, {
         params: { secret: adminSecret },
       });
-      setPlayers(r.data);
+      const data = r.data;
+      setPlayers(Array.isArray(data) ? data : data.players || []);
       setAuthed(true);
+      setSecretError("");
       loadMoves();
     } catch {
       setSecretError("Invalid admin password.");
     }
   };
 
-  const loadPlayers = useCallback(async () => {
-    const r = await axios.get(`${API}/roster/players`);
-    setPlayers(r.data);
-  }, []);
-
-  const loadMoves = async () => {
-    const r = await axios.get(`${API}/roster/moves`);
-    setMoves(r.data);
-  };
-
   const handleSearch = async () => {
-    if (!searchQ.trim()) return;
-    const r = await axios.get(`${API}/roster/players/search`, {
-      params: { q: searchQ },
-    });
-    setSearchResults(r.data);
+    if (!searchQ.trim()) {
+      setSearchResults([]);
+      loadPlayers();
+      return;
+    }
+
+    try {
+      const r = await axios.get(`${API}/roster/players/search`, {
+        params: { q: searchQ },
+      });
+      const data = r.data;
+      setSearchResults(Array.isArray(data) ? data : data.players || []);
+    } catch {
+      setSearchResults([]);
+    }
   };
 
   const handleAddPlayer = async () => {
+    if (
+      !addForm.name ||
+      !addForm.team ||
+      !addForm.position_group ||
+      !addForm.impact_score
+    ) {
+      showToast("Name, team, position group, and impact score are required.");
+      return;
+    }
+
     setLoading(true);
+
     try {
       await axios.post(
         `${API}/roster/player/add`,
@@ -162,9 +210,12 @@ export default function RosterPage() {
         },
         { params: { secret: adminSecret } },
       );
+
       showToast(`✓ ${addForm.name} added to ${addForm.team}`);
       setAddForm({});
-      loadPlayers();
+      setSearchResults([]);
+      await loadPlayers();
+      await loadStatus();
     } catch (e: any) {
       showToast("Error: " + (e?.response?.data?.detail || e.message));
     } finally {
@@ -177,7 +228,9 @@ export default function RosterPage() {
       showToast("Player ID and new team required.");
       return;
     }
+
     setLoading(true);
+
     try {
       const r = await axios.post(
         `${API}/roster/player/transfer`,
@@ -189,15 +242,19 @@ export default function RosterPage() {
         },
         { params: { secret: adminSecret } },
       );
+
       const mv = r.data.move;
-      showToast(
-        `✓ ${mv.player_name} → ${xferTeam} (${mv.from_team} → ${xferTeam})`,
-      );
+
+      showToast(`✓ ${mv.player_name} → ${xferTeam}`);
       setXferPlayerId("");
       setXferTeam("");
       setXferNotes("");
-      loadPlayers();
-      loadMoves();
+      setSearchQ("");
+      setSearchResults([]);
+
+      await loadPlayers();
+      await loadMoves();
+      await loadStatus();
     } catch (e: any) {
       showToast("Error: " + (e?.response?.data?.detail || e.message));
     } finally {
@@ -205,7 +262,9 @@ export default function RosterPage() {
     }
   };
 
-  if (authLoading || !user || userStatus !== "approved")
+  const visiblePlayers = searchResults.length > 0 ? searchResults : players;
+
+  if (authLoading || !user || userStatus !== "approved") {
     return (
       <div className="field-bg min-h-screen flex items-center justify-center">
         <div
@@ -216,15 +275,16 @@ export default function RosterPage() {
         </div>
       </div>
     );
+  }
 
   return (
     <>
       <Head>
         <title>Roster Intel — Prime Picks</title>
       </Head>
+
       <div className="field-bg min-h-screen px-4 py-10">
         <div className="max-w-4xl mx-auto">
-          {/* Header */}
           <div className="flex items-center justify-between mb-2 flex-wrap gap-3">
             <div className="flex items-center gap-3">
               <span style={{ fontSize: 28 }}>👤</span>
@@ -235,6 +295,7 @@ export default function RosterPage() {
                 ROSTER INTEL
               </h1>
             </div>
+
             <nav
               className="flex gap-4 text-xs"
               style={{ fontFamily: "var(--font-mono)" }}
@@ -250,9 +311,9 @@ export default function RosterPage() {
               </Link>
             </nav>
           </div>
+
           <div className="gold-line mb-5" />
 
-          {/* Status bar */}
           {status && (
             <div className="panel-bright rounded-xl px-5 py-3 mb-5 flex flex-wrap gap-5 items-center">
               <div
@@ -262,6 +323,7 @@ export default function RosterPage() {
                 <span className="text-slate">Teams tracked: </span>
                 <span className="text-chalk">{status.db_stats.teams}</span>
               </div>
+
               <div
                 className="text-xs"
                 style={{ fontFamily: "var(--font-mono)" }}
@@ -269,6 +331,7 @@ export default function RosterPage() {
                 <span className="text-slate">Players: </span>
                 <span className="text-chalk">{status.db_stats.players}</span>
               </div>
+
               <div
                 className="text-xs"
                 style={{ fontFamily: "var(--font-mono)" }}
@@ -278,6 +341,7 @@ export default function RosterPage() {
                   {status.db_stats.moves_logged}
                 </span>
               </div>
+
               <div
                 className="text-xs"
                 style={{ fontFamily: "var(--font-mono)" }}
@@ -295,6 +359,7 @@ export default function RosterPage() {
                   {status.data_sources.active_source}
                 </span>
               </div>
+
               {!status.data_sources.sportsdata_io &&
                 !status.data_sources.mysportsfeeds && (
                   <span
@@ -321,7 +386,6 @@ export default function RosterPage() {
             </div>
           )}
 
-          {/* Impact guide */}
           <div className="panel rounded-xl p-4 mb-5">
             <div
               className="text-xs text-slate mb-3 uppercase tracking-widest"
@@ -329,6 +393,7 @@ export default function RosterPage() {
             >
               Impact Score Guide
             </div>
+
             <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
               {IMPACT_GUIDE.map((t) => (
                 <div
@@ -351,7 +416,6 @@ export default function RosterPage() {
             </div>
           </div>
 
-          {/* Tabs */}
           <div className="flex gap-2 mb-5 flex-wrap">
             {(["players", "add", "transfer", "moves"] as const).map((t) => (
               <button
@@ -379,7 +443,6 @@ export default function RosterPage() {
             ))}
           </div>
 
-          {/* Admin auth gate for write operations */}
           {(tab === "add" || tab === "transfer") && !authed && (
             <div className="panel rounded-xl p-6 max-w-xs">
               <label
@@ -388,6 +451,7 @@ export default function RosterPage() {
               >
                 Admin Password
               </label>
+
               <input
                 type="password"
                 className="w-full rounded px-3 py-2 text-sm mb-2"
@@ -396,6 +460,7 @@ export default function RosterPage() {
                 onKeyDown={(e) => e.key === "Enter" && handleAuth()}
                 placeholder="Enter admin password"
               />
+
               {secretError && (
                 <p
                   className="text-xs mb-2"
@@ -404,6 +469,7 @@ export default function RosterPage() {
                   {secretError}
                 </p>
               )}
+
               <button
                 onClick={handleAuth}
                 className="score-display w-full py-2 rounded"
@@ -421,7 +487,6 @@ export default function RosterPage() {
             </div>
           )}
 
-          {/* Players tab */}
           {tab === "players" && (
             <div>
               <div className="flex gap-2 mb-4">
@@ -432,6 +497,7 @@ export default function RosterPage() {
                   onChange={(e) => setSearchQ(e.target.value)}
                   onKeyDown={(e) => e.key === "Enter" && handleSearch()}
                 />
+
                 <button
                   onClick={handleSearch}
                   className="score-display px-4 py-2 rounded"
@@ -446,56 +512,57 @@ export default function RosterPage() {
                   SEARCH
                 </button>
               </div>
+
               <div className="space-y-2">
-                {(searchResults.length > 0 ? searchResults : players)
-                  .slice(0, 50)
-                  .map((p, i) => (
-                    <div
-                      key={i}
-                      className="panel rounded-xl px-4 py-3 flex items-center justify-between gap-3"
-                    >
-                      <div>
-                        <span className="text-chalk text-sm font-semibold">
-                          {p.name}
-                        </span>
+                {visiblePlayers.slice(0, 50).map((p, i) => (
+                  <div
+                    key={p.player_id || p.id || i}
+                    className="panel rounded-xl px-4 py-3 flex items-center justify-between gap-3"
+                  >
+                    <div>
+                      <span className="text-chalk text-sm font-semibold">
+                        {p.name}
+                      </span>
+                      <span
+                        className="text-slate text-xs ml-2"
+                        style={{ fontFamily: "var(--font-mono)" }}
+                      >
+                        {p.position_group} · {p.team}
+                      </span>
+                      {p.notes && (
                         <span
-                          className="text-slate text-xs ml-2"
-                          style={{ fontFamily: "var(--font-mono)" }}
-                        >
-                          {p.position_group} · {p.team}
-                        </span>
-                        {p.notes && (
-                          <span
-                            className="text-xs ml-2"
-                            style={{
-                              color: "#4A5568",
-                              fontFamily: "var(--font-mono)",
-                            }}
-                          >
-                            {p.notes}
-                          </span>
-                        )}
-                      </div>
-                      <div className="shrink-0">
-                        <span
-                          className="score-display text-lg"
+                          className="text-xs ml-2"
                           style={{
-                            color:
-                              p.impact_score >= 85
-                                ? "#C9A84C"
-                                : p.impact_score >= 70
-                                  ? "#3DAA6A"
-                                  : p.impact_score >= 50
-                                    ? "#8B9BB4"
-                                    : "#4A5568",
+                            color: "#4A5568",
+                            fontFamily: "var(--font-mono)",
                           }}
                         >
-                          {p.impact_score}
+                          {p.notes}
                         </span>
-                      </div>
+                      )}
                     </div>
-                  ))}
-                {players.length === 0 && searchResults.length === 0 && (
+
+                    <div className="shrink-0">
+                      <span
+                        className="score-display text-lg"
+                        style={{
+                          color:
+                            p.impact_score >= 85
+                              ? "#C9A84C"
+                              : p.impact_score >= 70
+                                ? "#3DAA6A"
+                                : p.impact_score >= 50
+                                  ? "#8B9BB4"
+                                  : "#4A5568",
+                        }}
+                      >
+                        {p.impact_score}
+                      </span>
+                    </div>
+                  </div>
+                ))}
+
+                {visiblePlayers.length === 0 && (
                   <div className="panel rounded-xl p-8 text-center">
                     <p
                       className="text-slate text-sm"
@@ -510,7 +577,6 @@ export default function RosterPage() {
             </div>
           )}
 
-          {/* Add player tab */}
           {tab === "add" && authed && (
             <div className="panel rounded-xl p-6 max-w-lg">
               <div className="space-y-4">
@@ -556,6 +622,7 @@ export default function RosterPage() {
                     />
                   </div>
                 ))}
+
                 <div className="grid grid-cols-2 gap-3">
                   <div>
                     <label
@@ -564,6 +631,7 @@ export default function RosterPage() {
                     >
                       Position Group
                     </label>
+
                     <select
                       className="w-full rounded px-3 py-2.5 text-sm"
                       value={addForm.position_group || ""}
@@ -582,6 +650,7 @@ export default function RosterPage() {
                       ))}
                     </select>
                   </div>
+
                   <div>
                     <label
                       className="block text-xs text-slate mb-1 uppercase tracking-widest"
@@ -589,6 +658,7 @@ export default function RosterPage() {
                     >
                       League
                     </label>
+
                     <select
                       className="w-full rounded px-3 py-2.5 text-sm"
                       value={addForm.league || "NFL"}
@@ -604,6 +674,7 @@ export default function RosterPage() {
                     </select>
                   </div>
                 </div>
+
                 <div>
                   <label
                     className="block text-xs text-slate mb-1 uppercase tracking-widest"
@@ -611,6 +682,7 @@ export default function RosterPage() {
                   >
                     Impact Score (0–100)
                   </label>
+
                   <input
                     type="number"
                     min="0"
@@ -627,6 +699,7 @@ export default function RosterPage() {
                   />
                 </div>
               </div>
+
               <button
                 onClick={handleAddPlayer}
                 disabled={loading}
@@ -647,16 +720,16 @@ export default function RosterPage() {
             </div>
           )}
 
-          {/* Transfer tab */}
           {tab === "transfer" && authed && (
             <div className="panel rounded-xl p-6 max-w-lg">
               <p
                 className="text-xs text-slate mb-4"
                 style={{ fontFamily: "var(--font-mono)", lineHeight: 1.6 }}
               >
-                Log a player move. This updates both teams' rating adjustments
-                immediately, affecting all future predictions.
+                Log a player move. This updates both teams&apos; rating
+                adjustments immediately, affecting all future predictions.
               </p>
+
               <div className="space-y-4">
                 <div>
                   <label
@@ -665,14 +738,14 @@ export default function RosterPage() {
                   >
                     Player ID or Search
                   </label>
-                  <div className="flex gap-2">
-                    <input
-                      className="flex-1 rounded px-3 py-2.5 text-sm"
-                      placeholder="Search name first →"
-                      value={xferPlayerId}
-                      onChange={(e) => setXferPlayerId(e.target.value)}
-                    />
-                  </div>
+
+                  <input
+                    className="w-full rounded px-3 py-2.5 text-sm"
+                    placeholder="Search name first →"
+                    value={xferPlayerId}
+                    onChange={(e) => setXferPlayerId(e.target.value)}
+                  />
+
                   <div className="flex gap-2 mt-2">
                     <input
                       className="flex-1 rounded px-3 py-2 text-xs"
@@ -680,6 +753,7 @@ export default function RosterPage() {
                       value={searchQ}
                       onChange={(e) => setSearchQ(e.target.value)}
                     />
+
                     <button
                       onClick={handleSearch}
                       className="score-display px-3 py-2 rounded text-xs"
@@ -694,11 +768,12 @@ export default function RosterPage() {
                       FIND
                     </button>
                   </div>
+
                   {searchResults.slice(0, 5).map((p) => (
                     <button
                       key={p.player_id}
                       onClick={() => {
-                        setXferPlayerId(p.name);
+                        setXferPlayerId(p.player_id || p.name);
                         setSearchResults([]);
                         setSearchQ("");
                       }}
@@ -716,6 +791,7 @@ export default function RosterPage() {
                     </button>
                   ))}
                 </div>
+
                 <div>
                   <label
                     className="block text-xs text-slate mb-1 uppercase tracking-widest"
@@ -723,6 +799,7 @@ export default function RosterPage() {
                   >
                     New Team
                   </label>
+
                   <input
                     className="w-full rounded px-3 py-2.5 text-sm"
                     placeholder="e.g. Dallas Cowboys"
@@ -730,6 +807,7 @@ export default function RosterPage() {
                     onChange={(e) => setXferTeam(e.target.value)}
                   />
                 </div>
+
                 <div>
                   <label
                     className="block text-xs text-slate mb-1 uppercase tracking-widest"
@@ -737,6 +815,7 @@ export default function RosterPage() {
                   >
                     Move Type
                   </label>
+
                   <select
                     className="w-full rounded px-3 py-2.5 text-sm"
                     value={xferType}
@@ -749,6 +828,7 @@ export default function RosterPage() {
                     ))}
                   </select>
                 </div>
+
                 <div>
                   <label
                     className="block text-xs text-slate mb-1 uppercase tracking-widest"
@@ -756,6 +836,7 @@ export default function RosterPage() {
                   >
                     Notes (optional)
                   </label>
+
                   <input
                     className="w-full rounded px-3 py-2.5 text-sm"
                     placeholder="e.g. 3-year, $90M deal"
@@ -764,6 +845,7 @@ export default function RosterPage() {
                   />
                 </div>
               </div>
+
               <button
                 onClick={handleTransfer}
                 disabled={loading}
@@ -784,7 +866,6 @@ export default function RosterPage() {
             </div>
           )}
 
-          {/* Move log tab */}
           {tab === "moves" && (
             <div className="space-y-2">
               {moves.length === 0 && (
@@ -797,8 +878,9 @@ export default function RosterPage() {
                   </p>
                 </div>
               )}
+
               {moves.map((m, i) => (
-                <div key={i} className="panel rounded-xl px-4 py-3">
+                <div key={m.id || i} className="panel rounded-xl px-4 py-3">
                   <div className="flex items-center justify-between flex-wrap gap-2">
                     <div>
                       <span className="text-chalk text-sm font-semibold">
@@ -811,6 +893,7 @@ export default function RosterPage() {
                         {m.position_group} · Impact {m.impact_score}
                       </span>
                     </div>
+
                     <span
                       className="text-xs px-2 py-0.5 rounded"
                       style={{
@@ -823,6 +906,7 @@ export default function RosterPage() {
                       {m.move_type.replace("_", " ")}
                     </span>
                   </div>
+
                   <div
                     className="mt-1 text-xs text-slate"
                     style={{ fontFamily: "var(--font-mono)" }}
