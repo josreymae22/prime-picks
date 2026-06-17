@@ -354,6 +354,7 @@ def verify_admin(secret: str):
 
 @app.get("/roster/status")
 def roster_status():
+    roster_engine.reload()
     return {
         "db_stats": roster_engine.get_db_stats(),
         "data_sources": get_data_source_status(),
