@@ -1,17 +1,21 @@
 """
 roster_engine.py
-Manages team rosters and positional group ratings.
+Manages team rosters and positional group ratings using Firestore.
 """
 
-import json
-import os
 import logging
 from typing import Optional
 from datetime import datetime
 
+from firebase_admin import firestore
+
 logger = logging.getLogger(__name__)
 
-ROSTER_DB_PATH = os.path.join(os.path.dirname(__file__), "roster_db.json")
+db = firestore.client()
+
+PLAYERS_COLLECTION = "roster_players"
+TEAMS_COLLECTION = "roster_teams"
+MOVES_COLLECTION = "roster_moves"
 
 POSITION_GROUPS = {
     "QB": {"side": "offense", "weight": 0.35},
@@ -35,17 +39,8 @@ IMPACT_TIERS = {
 }
 
 
-def _load_db() -> dict:
-    if os.path.exists(ROSTER_DB_PATH):
-        with open(ROSTER_DB_PATH, "r") as f:
-            return json.load(f)
-    return {"teams": {}, "players": {}, "moves": [], "last_updated": None}
-
-
-def _save_db(db: dict):
-    db["last_updated"] = datetime.utcnow().isoformat()
-    with open(ROSTER_DB_PATH, "w") as f:
-        json.dump(db, f, indent=2)
+def _now_iso() -> str:
+    return datetime.utcnow().isoformat()
 
 
 def _slugify(value: str) -> str:
@@ -53,43 +48,51 @@ def _slugify(value: str) -> str:
 
 
 class RosterEngine:
-    def __init__(self):
-        self.db = _load_db()
-
     def reload(self):
-        self.db = _load_db()
+        # Firestore is live, no local reload needed.
+        return None
+
+    def _team_ref(self, team_name: str):
+        return db.collection(TEAMS_COLLECTION).document(team_name)
+
+    def _player_ref(self, player_id: str):
+        return db.collection(PLAYERS_COLLECTION).document(player_id)
 
     def init_team(self, team_name: str, league: str, base_sp: float = 0.0):
-        if team_name not in self.db["teams"]:
-            self.db["teams"][team_name] = {
+        ref = self._team_ref(team_name)
+        if not ref.get().exists:
+            ref.set({
+                "name": team_name,
                 "league": league,
                 "base_sp": base_sp,
                 "groups": {g: {"rating": 50.0, "players": []} for g in POSITION_GROUPS},
                 "roster_adjustment": 0.0,
-            }
-            _save_db(self.db)
+                "updated_at": _now_iso(),
+            })
 
     def set_team_base_rating(self, team_name: str, base_sp: float):
-        if team_name in self.db["teams"]:
-            self.db["teams"][team_name]["base_sp"] = base_sp
-            _save_db(self.db)
+        ref = self._team_ref(team_name)
+        if ref.get().exists:
+            ref.update({
+                "base_sp": base_sp,
+                "updated_at": _now_iso(),
+            })
 
     def _find_player_key(self, player_id_or_name: str) -> Optional[str]:
         lookup = player_id_or_name.strip().lower()
+        slug = _slugify(player_id_or_name)
 
-        # Exact player_id match
-        if player_id_or_name in self.db["players"]:
+        if self._player_ref(player_id_or_name).get().exists:
             return player_id_or_name
 
-        # Slug match
-        slug = _slugify(player_id_or_name)
-        if slug in self.db["players"]:
+        if self._player_ref(slug).get().exists:
             return slug
 
-        # Exact name match
-        for key, player in self.db["players"].items():
+        docs = db.collection(PLAYERS_COLLECTION).stream()
+        for doc in docs:
+            player = doc.to_dict()
             if player.get("name", "").strip().lower() == lookup:
-                return key
+                return doc.id
 
         return None
 
@@ -106,30 +109,37 @@ class RosterEngine:
         if not player_id:
             player_id = _slugify(name)
 
+        self.init_team(team, league)
+
         player = {
             "player_id": player_id,
             "name": name,
             "team": team,
             "position_group": position_group,
-            "impact_score": impact_score,
+            "impact_score": float(impact_score),
             "league": league,
             "notes": notes,
-            "updated_at": datetime.utcnow().isoformat(),
+            "updated_at": _now_iso(),
         }
 
-        self.db["players"][player_id] = player
+        self._player_ref(player_id).set(player)
 
-        if team not in self.db["teams"]:
-            self.init_team(team, league)
+        team_doc = self._team_ref(team).get().to_dict()
+        groups = team_doc.get("groups", {g: {"rating": 50.0, "players": []} for g in POSITION_GROUPS})
 
-        team_data = self.db["teams"][team]
-        if position_group in team_data["groups"]:
-            existing = team_data["groups"][position_group]["players"]
-            if player_id not in existing:
-                existing.append(player_id)
+        if position_group in groups:
+            players = groups[position_group].get("players", [])
+            if player_id not in players:
+                players.append(player_id)
+            groups[position_group]["players"] = players
+
+        self._team_ref(team).update({
+            "groups": groups,
+            "updated_at": _now_iso(),
+        })
 
         self._recalculate_team_adjustment(team)
-        _save_db(self.db)
+
         return player
 
     def transfer_player(
@@ -144,31 +154,51 @@ class RosterEngine:
         if not real_player_key:
             raise ValueError(f"Player {player_id} not found")
 
-        player = self.db["players"][real_player_key]
+        player_ref = self._player_ref(real_player_key)
+        player = player_ref.get().to_dict()
+
         old_team = player["team"]
         old_group = player["position_group"]
 
-        if old_team in self.db["teams"]:
-            old_team_data = self.db["teams"][old_team]
-            if old_group in old_team_data["groups"]:
-                players = old_team_data["groups"][old_group]["players"]
-                if real_player_key in players:
-                    players.remove(real_player_key)
-            self._recalculate_team_adjustment(old_team)
+        self.init_team(new_team, player["league"])
 
-        player["team"] = new_team
-        player["notes"] = notes
-        player["updated_at"] = datetime.utcnow().isoformat()
+        old_team_doc = self._team_ref(old_team).get()
+        if old_team_doc.exists:
+            old_team_data = old_team_doc.to_dict()
+            old_groups = old_team_data.get("groups", {})
 
-        if new_team not in self.db["teams"]:
-            self.init_team(new_team, player["league"])
+            if old_group in old_groups:
+                old_players = old_groups[old_group].get("players", [])
+                old_groups[old_group]["players"] = [
+                    pid for pid in old_players if pid != real_player_key
+                ]
 
-        new_team_data = self.db["teams"][new_team]
-        if old_group in new_team_data["groups"]:
-            players = new_team_data["groups"][old_group]["players"]
-            if real_player_key not in players:
-                players.append(real_player_key)
+            self._team_ref(old_team).update({
+                "groups": old_groups,
+                "updated_at": _now_iso(),
+            })
 
+        new_team_doc = self._team_ref(new_team).get().to_dict()
+        new_groups = new_team_doc.get("groups", {g: {"rating": 50.0, "players": []} for g in POSITION_GROUPS})
+
+        if old_group in new_groups:
+            new_players = new_groups[old_group].get("players", [])
+            if real_player_key not in new_players:
+                new_players.append(real_player_key)
+            new_groups[old_group]["players"] = new_players
+
+        self._team_ref(new_team).update({
+            "groups": new_groups,
+            "updated_at": _now_iso(),
+        })
+
+        player_ref.update({
+            "team": new_team,
+            "notes": notes,
+            "updated_at": _now_iso(),
+        })
+
+        self._recalculate_team_adjustment(old_team)
         self._recalculate_team_adjustment(new_team)
 
         move_record = {
@@ -180,11 +210,10 @@ class RosterEngine:
             "impact_score": player["impact_score"],
             "move_type": move_type,
             "notes": notes,
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": _now_iso(),
         }
 
-        self.db["moves"].append(move_record)
-        _save_db(self.db)
+        db.collection(MOVES_COLLECTION).add(move_record)
 
         return {
             "move": move_record,
@@ -193,86 +222,128 @@ class RosterEngine:
         }
 
     def _recalculate_team_adjustment(self, team_name: str):
-        if team_name not in self.db["teams"]:
+        team_ref = self._team_ref(team_name)
+        team_doc = team_ref.get()
+
+        if not team_doc.exists:
             return
 
-        team_data = self.db["teams"][team_name]
+        team_data = team_doc.to_dict()
+        groups = team_data.get("groups", {})
         weighted_delta = 0.0
 
         for group_name, group_info in POSITION_GROUPS.items():
-            group_data = team_data["groups"].get(group_name, {"players": []})
+            group_data = groups.get(group_name, {"players": []})
             player_ids = group_data.get("players", [])
 
-            if player_ids:
-                scores = [
-                    self.db["players"][pid]["impact_score"]
-                    for pid in player_ids
-                    if pid in self.db["players"]
-                ]
-                avg_score = sum(scores) / len(scores) if scores else 50.0
-            else:
-                avg_score = 50.0
+            scores = []
+            for pid in player_ids:
+                player_doc = self._player_ref(pid).get()
+                if player_doc.exists:
+                    scores.append(float(player_doc.to_dict().get("impact_score", 50.0)))
 
+            avg_score = sum(scores) / len(scores) if scores else 50.0
             group_data["rating"] = round(avg_score, 1)
+            groups[group_name] = group_data
+
             weighted_delta += (avg_score - 50.0) * group_info["weight"]
 
-        team_data["roster_adjustment"] = round(weighted_delta * 0.1, 3)
+        team_ref.update({
+            "groups": groups,
+            "roster_adjustment": round(weighted_delta * 0.1, 3),
+            "updated_at": _now_iso(),
+        })
 
     def get_team_adjustment(self, team_name: str) -> Optional[float]:
-        if team_name not in self.db["teams"]:
+        doc = self._team_ref(team_name).get()
+        if not doc.exists:
             return None
-        return self.db["teams"][team_name].get("roster_adjustment", 0.0)
+        return doc.to_dict().get("roster_adjustment", 0.0)
 
     def get_team_profile(self, team_name: str) -> Optional[dict]:
-        if team_name not in self.db["teams"]:
+        doc = self._team_ref(team_name).get()
+        if not doc.exists:
             return None
 
-        team = self.db["teams"][team_name].copy()
+        team = doc.to_dict()
+        groups = team.get("groups", {})
 
-        for group_name, group_data in team["groups"].items():
+        for group_name, group_data in groups.items():
             enriched = []
             for pid in group_data.get("players", []):
-                if pid in self.db["players"]:
-                    p = self.db["players"][pid]
+                player_doc = self._player_ref(pid).get()
+                if player_doc.exists:
+                    p = player_doc.to_dict()
                     enriched.append({
                         "id": pid,
-                        "name": p["name"],
-                        "impact_score": p["impact_score"],
+                        "name": p.get("name"),
+                        "impact_score": p.get("impact_score"),
                         "notes": p.get("notes", ""),
                     })
             group_data["player_details"] = enriched
 
+        team["groups"] = groups
         return team
 
     def get_all_teams(self) -> list[dict]:
-        return [
-            {"name": k, **{f: v for f, v in v.items() if f != "groups"}}
-            for k, v in self.db["teams"].items()
-        ]
+        docs = db.collection(TEAMS_COLLECTION).stream()
+        teams = []
+
+        for doc in docs:
+            data = doc.to_dict()
+            data.pop("groups", None)
+            teams.append(data)
+
+        return teams
 
     def get_recent_moves(self, limit: int = 50) -> list[dict]:
-        moves = self.db.get("moves", [])
-        return sorted(moves, key=lambda m: m["timestamp"], reverse=True)[:limit]
+        docs = (
+            db.collection(MOVES_COLLECTION)
+            .order_by("timestamp", direction=firestore.Query.DESCENDING)
+            .limit(limit)
+            .stream()
+        )
+
+        return [{**doc.to_dict(), "id": doc.id} for doc in docs]
 
     def get_all_players(self, team: Optional[str] = None) -> list[dict]:
-        players = list(self.db["players"].values())
+        query = db.collection(PLAYERS_COLLECTION)
+
         if team:
-            players = [p for p in players if p["team"] == team]
-        return sorted(players, key=lambda p: p["impact_score"], reverse=True)
+            docs = query.where("team", "==", team).stream()
+        else:
+            docs = query.stream()
+
+        players = [{**doc.to_dict(), "id": doc.id} for doc in docs]
+
+        return sorted(players, key=lambda p: p.get("impact_score", 0), reverse=True)
 
     def search_players(self, query: str) -> list[dict]:
         q = query.lower()
+        players = self.get_all_players()
+
         return [
-            p for p in self.db["players"].values()
-            if q in p["name"].lower() or q in p["team"].lower()
+            p for p in players
+            if q in p.get("name", "").lower() or q in p.get("team", "").lower()
         ]
 
     def get_db_stats(self) -> dict:
+        teams = list(db.collection(TEAMS_COLLECTION).stream())
+        players = list(db.collection(PLAYERS_COLLECTION).stream())
+        moves = list(db.collection(MOVES_COLLECTION).stream())
+
+        last_updated = None
+
+        for doc in teams:
+            updated = doc.to_dict().get("updated_at")
+            if updated and (last_updated is None or updated > last_updated):
+                last_updated = updated
+
         return {
-            "teams": len(self.db["teams"]),
-            "players": len(self.db["players"]),
-            "moves_logged": len(self.db.get("moves", [])),
-            "last_updated": self.db.get("last_updated"),
+            "teams": len(teams),
+            "players": len(players),
+            "moves_logged": len(moves),
+            "last_updated": last_updated,
         }
 
 
