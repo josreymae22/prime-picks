@@ -1,0 +1,40 @@
+name: Prime Picks Hourly Update
+
+on:
+  schedule:
+    # Run at the start of every hour
+    - cron: "0 * * * *"
+
+  # Allows us to test it manually from GitHub
+  workflow_dispatch:
+
+jobs:
+  update-prime-picks:
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: backend
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run Prime Picks update
+        env:
+          ADMIN_SECRET: ${{ secrets.ADMIN_SECRET }}
+          FIREBASE_PROJECT_ID: ${{ secrets.FIREBASE_PROJECT_ID }}
+          FIREBASE_CLIENT_EMAIL: ${{ secrets.FIREBASE_CLIENT_EMAIL }}
+          FIREBASE_PRIVATE_KEY: ${{ secrets.FIREBASE_PRIVATE_KEY }}
+          ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+          CFBD_API_KEY: ${{ secrets.CFBD_API_KEY }}
+          PP_API_URL: ${{ secrets.PP_API_URL }}
+        run: python weekly.py --once
