@@ -263,6 +263,106 @@ def build_nfl_matchup_features(
     }
 
 
+def build_nfl_training_data(games: list[dict], window: int = 8) -> pd.DataFrame:
+    """
+    Build leakage-safe NFL training data.
+
+    Each historical game's features use ONLY games that occurred
+    before that matchup.
+    """
+
+    if not games:
+        return pd.DataFrame()
+
+    games = sorted(
+        games,
+        key=lambda g: (
+            g.get("season", 0),
+            g.get("week", 0),
+            g.get("date", ""),
+        ),
+    )
+
+    team_history = {}
+    rows = []
+
+    def recent_stats(team: str):
+        history = team_history.get(team, [])[-window:]
+
+        if not history:
+            return {
+                "avg_pts_for": 23.0,
+                "avg_pts_against": 23.0,
+                "avg_margin": 0.0,
+            }
+
+        pts_for = [g["pts_for"] for g in history]
+        pts_against = [g["pts_against"] for g in history]
+
+        return {
+            "avg_pts_for": float(np.mean(pts_for)),
+            "avg_pts_against": float(np.mean(pts_against)),
+            "avg_margin": float(
+                np.mean(
+                    [
+                        pf - pa
+                        for pf, pa in zip(
+                            pts_for,
+                            pts_against,
+                        )
+                    ]
+                )
+            ),
+        }
+
+    for game in games:
+        home_team = game["home_team"]
+        away_team = game["away_team"]
+
+        # IMPORTANT:
+        # Calculate features BEFORE adding this game's result.
+        stats = {
+            home_team: recent_stats(home_team),
+            away_team: recent_stats(away_team),
+        }
+
+        features = build_nfl_matchup_features(
+            home_team,
+            away_team,
+            stats,
+            neutral_site=False,
+        )
+
+        home_score = float(game["home_score"])
+        away_score = float(game["away_score"])
+
+        features["margin"] = home_score - away_score
+        features["total"] = home_score + away_score
+        features["season"] = game.get("season")
+        features["week"] = game.get("week")
+        features["home_team"] = home_team
+        features["away_team"] = away_team
+
+        rows.append(features)
+
+        # Only after producing the training row do we add the result.
+        team_history.setdefault(
+            home_team,
+            [],
+        ).append({
+            "pts_for": home_score,
+            "pts_against": away_score,
+        })
+
+        team_history.setdefault(
+            away_team,
+            [],
+        ).append({
+            "pts_for": away_score,
+            "pts_against": home_score,
+        })
+
+    return pd.DataFrame(rows)
 # ============================================================
 # CFB SP+ Feature Builder
 # ============================================================
