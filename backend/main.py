@@ -10,9 +10,10 @@ Training:
 - CFB training uses season-specific SP+ ratings
 
 Production:
-- Current/latest NFL team form used for predictions
-- Current CFB SP+ used for predictions when available
-- Falls back to latest completed CFB season SP+ when necessary
+- FastAPI binds to Render immediately
+- Heavy model initialization happens in the background
+- /health is available while models train
+- /predict and /card return 503 until initialization completes
 """
 
 import asyncio
@@ -27,7 +28,6 @@ import pandas as pd
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from pydantic import BaseModel as BM
 
 from data_fetcher import (
     get_nfl_teams,
@@ -39,7 +39,6 @@ from data_fetcher import (
     get_cfb_sp_ratings,
     nfl_training_seasons,
     cfb_training_seasons,
-    current_nfl_season,
     current_cfb_season,
 )
 
@@ -76,16 +75,19 @@ app_state = {
     "nfl_teams": [],
     "cfb_teams": [],
 
-    # Current prediction data
     "nfl_team_stats": {},
     "cfb_sp_lookup": {},
 
-    # Training diagnostics
     "training_results": {},
     "nfl_training_seasons": [],
     "cfb_training_seasons": [],
 
     "ready": False,
+    "initializing": False,
+    "startup_error": None,
+
+    "initialization_task": None,
+    "snapshot_task": None,
 }
 
 
@@ -97,12 +99,11 @@ async def build_current_cfb_sp_lookup(
     training_seasons: list[int],
 ) -> dict:
     """
-    Build the SP+ lookup used for live/current predictions.
+    Build SP+ lookup used for current/live predictions.
 
-    First try the current CFB season.
-
-    If current-season SP+ is not yet available, fall back to the
-    latest completed season.
+    Try current season first.
+    Fall back to latest completed season if current ratings
+    are not yet available.
     """
 
     current_season = current_cfb_season()
@@ -137,10 +138,12 @@ async def build_current_cfb_sp_lookup(
             exc,
         )
 
-    # Fall back to latest completed season.
+
     if training_seasons:
 
-        fallback_season = training_seasons[-1]
+        fallback_season = (
+            training_seasons[-1]
+        )
 
         logger.info(
             "Falling back to CFB SP+ season %s...",
@@ -175,20 +178,40 @@ async def build_current_cfb_sp_lookup(
 
 
 # ============================================================
-# Application lifecycle
+# Background initialization
 # ============================================================
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
+async def initialize_prime_picks():
+    """
+    Heavy startup work.
 
-    nfl_seasons = nfl_training_seasons()
-    cfb_seasons = cfb_training_seasons()
+    IMPORTANT:
+    This runs as a background asyncio task AFTER FastAPI has
+    been allowed to bind to Render's HTTP port.
+    """
 
-    app_state["nfl_training_seasons"] = nfl_seasons
-    app_state["cfb_training_seasons"] = cfb_seasons
+    app_state["initializing"] = True
+    app_state["ready"] = False
+    app_state["startup_error"] = None
+
+    nfl_seasons = (
+        nfl_training_seasons()
+    )
+
+    cfb_seasons = (
+        cfb_training_seasons()
+    )
+
+    app_state[
+        "nfl_training_seasons"
+    ] = nfl_seasons
+
+    app_state[
+        "cfb_training_seasons"
+    ] = cfb_seasons
 
     logger.info(
-        "🏈 Prime Picks starting"
+        "🏈 Prime Picks background initialization starting"
     )
 
     logger.info(
@@ -201,12 +224,10 @@ async def lifespan(app: FastAPI):
         cfb_seasons,
     )
 
-    snapshot_task = None
-
     try:
 
         # ====================================================
-        # NFL
+        # NFL TEAMS
         # ====================================================
 
         logger.info(
@@ -220,14 +241,16 @@ async def lifespan(app: FastAPI):
         logger.info(
             "NFL teams loaded: %s",
             len(
-                app_state["nfl_teams"]
+                app_state[
+                    "nfl_teams"
+                ]
             ),
         )
 
 
-        # ----------------------------------------------------
-        # Fetch historical NFL games
-        # ----------------------------------------------------
+        # ====================================================
+        # NFL HISTORICAL DATA
+        # ====================================================
 
         logger.info(
             "Fetching NFL historical games (%s)...",
@@ -246,15 +269,15 @@ async def lifespan(app: FastAPI):
         )
 
 
-        # ----------------------------------------------------
-        # Current/latest NFL form for predictions
-        # ----------------------------------------------------
+        # ====================================================
+        # NFL CURRENT TEAM FORM
+        # ====================================================
 
-        app_state["nfl_team_stats"] = (
-            build_nfl_team_rolling(
-                nfl_games,
-                window=8,
-            )
+        app_state[
+            "nfl_team_stats"
+        ] = build_nfl_team_rolling(
+            nfl_games,
+            window=8,
         )
 
         logger.info(
@@ -267,9 +290,9 @@ async def lifespan(app: FastAPI):
         )
 
 
-        # ----------------------------------------------------
-        # Leakage-safe NFL training data
-        # ----------------------------------------------------
+        # ====================================================
+        # NFL TRAINING
+        # ====================================================
 
         if len(nfl_games) > 20:
 
@@ -318,7 +341,7 @@ async def lifespan(app: FastAPI):
 
 
         # ====================================================
-        # CFB
+        # CFB HISTORICAL DATA
         # ====================================================
 
         logger.info(
@@ -338,14 +361,9 @@ async def lifespan(app: FastAPI):
         )
 
 
-        # ----------------------------------------------------
-        # Build CFB training data season-by-season.
-        #
-        # IMPORTANT:
-        # 2021 games use 2021 SP+
-        # 2022 games use 2022 SP+
-        # etc.
-        # ----------------------------------------------------
+        # ====================================================
+        # CFB SEASON-SPECIFIC TRAINING
+        # ====================================================
 
         cfb_training_frames = []
         cfb_training_diagnostics = {}
@@ -368,7 +386,9 @@ async def lifespan(app: FastAPI):
             logger.info(
                 "CFB %s raw games for training: %s",
                 season,
-                len(season_games),
+                len(
+                    season_games
+                ),
             )
 
             try:
@@ -454,9 +474,9 @@ async def lifespan(app: FastAPI):
                 )
 
 
-        # ----------------------------------------------------
-        # Combine season-specific CFB datasets
-        # ----------------------------------------------------
+        # ====================================================
+        # COMBINE CFB TRAINING DATA
+        # ====================================================
 
         if cfb_training_frames:
 
@@ -471,6 +491,7 @@ async def lifespan(app: FastAPI):
                 pd.DataFrame()
             )
 
+
         logger.info(
             "CFB total model training rows: %s",
             len(
@@ -479,9 +500,9 @@ async def lifespan(app: FastAPI):
         )
 
 
-        # ----------------------------------------------------
-        # Train CFB model
-        # ----------------------------------------------------
+        # ====================================================
+        # TRAIN CFB MODEL
+        # ====================================================
 
         cfb_result = (
             predictor.train_cfb(
@@ -509,9 +530,9 @@ async def lifespan(app: FastAPI):
         )
 
 
-        # ----------------------------------------------------
-        # Current SP+ lookup for live predictions
-        # ----------------------------------------------------
+        # ====================================================
+        # CURRENT CFB SP+
+        # ====================================================
 
         app_state[
             "cfb_sp_lookup"
@@ -521,7 +542,7 @@ async def lifespan(app: FastAPI):
 
 
         # ====================================================
-        # Initial injury refresh
+        # NFL INJURIES
         # ====================================================
 
         logger.info(
@@ -557,7 +578,7 @@ async def lifespan(app: FastAPI):
 
 
         # ====================================================
-        # Initial line snapshot
+        # INITIAL LINE SNAPSHOT
         # ====================================================
 
         logger.info(
@@ -577,12 +598,52 @@ async def lifespan(app: FastAPI):
 
 
         # ====================================================
-        # Ready
+        # START SNAPSHOT SCHEDULER
+        # ====================================================
+
+        try:
+
+            if (
+                app_state[
+                    "snapshot_task"
+                ]
+                is None
+                or
+                app_state[
+                    "snapshot_task"
+                ].done()
+            ):
+
+                app_state[
+                    "snapshot_task"
+                ] = asyncio.create_task(
+                    snapshotter.start_scheduler()
+                )
+
+                logger.info(
+                    "Line snapshot scheduler started."
+                )
+
+        except Exception as exc:
+
+            logger.warning(
+                "Snapshot scheduler failed to start: %s",
+                exc,
+            )
+
+
+        # ====================================================
+        # READY
         # ====================================================
 
         app_state[
             "ready"
         ] = True
+
+        app_state[
+            "startup_error"
+        ] = None
+
 
         logger.info(
             "✅ Prime Picks ready"
@@ -629,10 +690,19 @@ async def lifespan(app: FastAPI):
         )
 
 
+    except asyncio.CancelledError:
+
+        logger.info(
+            "Prime Picks initialization task cancelled."
+        )
+
+        raise
+
+
     except Exception as exc:
 
         logger.error(
-            "Startup error: %s",
+            "Background initialization error: %s",
             exc,
             exc_info=True,
         )
@@ -641,24 +711,71 @@ async def lifespan(app: FastAPI):
             "ready"
         ] = False
 
-
-    # ========================================================
-    # Background line snapshot scheduler
-    # ========================================================
-
-    try:
-
-        snapshot_task = asyncio.create_task(
-            snapshotter.start_scheduler()
+        app_state[
+            "startup_error"
+        ] = str(
+            exc
         )
 
-    except Exception as exc:
 
-        logger.warning(
-            "Snapshot scheduler failed to start: %s",
-            exc,
+    finally:
+
+        app_state[
+            "initializing"
+        ] = False
+
+
+# ============================================================
+# Application lifecycle
+# ============================================================
+
+@asynccontextmanager
+async def lifespan(
+    app: FastAPI,
+):
+    """
+    Start FastAPI immediately.
+
+    Heavy data loading / model training runs in a background task.
+
+    This prevents Render's:
+        "Port scan timeout reached, no open ports detected"
+    deployment failure.
+    """
+
+    logger.info(
+        "🚀 Prime Picks web service starting"
+    )
+
+    app_state[
+        "ready"
+    ] = False
+
+    app_state[
+        "initializing"
+    ] = True
+
+
+    # --------------------------------------------------------
+    # Start heavy initialization WITHOUT awaiting it.
+    # --------------------------------------------------------
+
+    initialization_task = (
+        asyncio.create_task(
+            initialize_prime_picks()
         )
+    )
 
+    app_state[
+        "initialization_task"
+    ] = initialization_task
+
+
+    # --------------------------------------------------------
+    # CRITICAL:
+    # Yield immediately so FastAPI completes startup and
+    # Uvicorn binds to Render's PORT.
+    # --------------------------------------------------------
 
     yield
 
@@ -667,32 +784,77 @@ async def lifespan(app: FastAPI):
     # Shutdown
     # ========================================================
 
+    logger.info(
+        "Prime Picks shutting down."
+    )
+
+
+    # --------------------------------------------------------
+    # Stop line snapshot scheduler
+    # --------------------------------------------------------
+
     try:
 
         snapshotter.stop_scheduler()
 
-        if snapshot_task:
-
-            snapshot_task.cancel()
-
-            try:
-
-                await snapshot_task
-
-            except asyncio.CancelledError:
-
-                pass
-
     except Exception as exc:
 
         logger.warning(
-            "Snapshot scheduler shutdown error: %s",
+            "Snapshot scheduler stop error: %s",
             exc,
         )
 
-    logger.info(
-        "Prime Picks shutting down."
+
+    snapshot_task = app_state.get(
+        "snapshot_task"
     )
+
+    if snapshot_task:
+
+        snapshot_task.cancel()
+
+        try:
+
+            await snapshot_task
+
+        except asyncio.CancelledError:
+
+            pass
+
+        except Exception as exc:
+
+            logger.warning(
+                "Snapshot scheduler shutdown error: %s",
+                exc,
+            )
+
+
+    # --------------------------------------------------------
+    # Cancel model initialization if still running
+    # --------------------------------------------------------
+
+    if (
+        initialization_task
+        and
+        not initialization_task.done()
+    ):
+
+        initialization_task.cancel()
+
+        try:
+
+            await initialization_task
+
+        except asyncio.CancelledError:
+
+            pass
+
+        except Exception as exc:
+
+            logger.warning(
+                "Initialization shutdown error: %s",
+                exc,
+            )
 
 
 # ============================================================
@@ -701,7 +863,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Prime Picks API",
-    version="1.1.0",
+    version="1.2.0",
     lifespan=lifespan,
 )
 
@@ -715,7 +877,7 @@ app.add_middleware(
 
 
 # ============================================================
-# Models
+# Request models
 # ============================================================
 
 class PredictRequest(BaseModel):
@@ -725,7 +887,7 @@ class PredictRequest(BaseModel):
     neutral_site: Optional[bool] = False
 
 
-class AddPlayerRequest(BM):
+class AddPlayerRequest(BaseModel):
     player_id: str
     name: str
     team: str
@@ -735,7 +897,7 @@ class AddPlayerRequest(BM):
     notes: str = ""
 
 
-class TransferPlayerRequest(BM):
+class TransferPlayerRequest(BaseModel):
     player_id: str
     new_team: str
     move_type: str = "trade"
@@ -772,10 +934,23 @@ def verify_admin(
 def health():
 
     return {
-        "status": "ok",
-        "ready": app_state[
-            "ready"
-        ],
+        "status":
+            "ok",
+
+        "ready":
+            app_state[
+                "ready"
+            ],
+
+        "initializing":
+            app_state[
+                "initializing"
+            ],
+
+        "startup_error":
+            app_state[
+                "startup_error"
+            ],
     }
 
 
@@ -786,6 +961,16 @@ def status():
         "ready":
             app_state[
                 "ready"
+            ],
+
+        "initializing":
+            app_state[
+                "initializing"
+            ],
+
+        "startup_error":
+            app_state[
+                "startup_error"
             ],
 
         "nfl_training_seasons":
@@ -877,17 +1062,16 @@ def predict(
         raise HTTPException(
             status_code=503,
             detail=(
-                "Models still training. "
-                "Try again in a moment."
+                "Models are still initializing. "
+                "Check /health and try again shortly."
             ),
         )
 
-    league = req.league.upper()
 
+    league = (
+        req.league.upper()
+    )
 
-    # --------------------------------------------------------
-    # NFL
-    # --------------------------------------------------------
 
     if league == "NFL":
 
@@ -920,10 +1104,6 @@ def predict(
             )
         )
 
-
-    # --------------------------------------------------------
-    # CFB
-    # --------------------------------------------------------
 
     elif league == "CFB":
 
@@ -992,7 +1172,8 @@ def predict(
                     "nfl_training_seasons"
                 ]
                 if league == "NFL"
-                else app_state[
+                else
+                app_state[
                     "cfb_training_seasons"
                 ]
             ),
@@ -1067,9 +1248,7 @@ def _nfl_key_factors(
         0,
     )
 
-    if abs(
-        off_delta
-    ) > 3:
+    if abs(off_delta) > 3:
 
         leader = (
             home
@@ -1091,9 +1270,7 @@ def _nfl_key_factors(
             "impact":
                 (
                     "high"
-                    if abs(
-                        off_delta
-                    ) > 6
+                    if abs(off_delta) > 6
                     else "medium"
                 ),
         })
@@ -1104,9 +1281,7 @@ def _nfl_key_factors(
         0,
     )
 
-    if abs(
-        def_delta
-    ) > 3:
+    if abs(def_delta) > 3:
 
         leader = (
             away
@@ -1127,9 +1302,7 @@ def _nfl_key_factors(
             "impact":
                 (
                     "high"
-                    if abs(
-                        def_delta
-                    ) > 6
+                    if abs(def_delta) > 6
                     else "medium"
                 ),
         })
@@ -1167,9 +1340,8 @@ def _nfl_key_factors(
         )
     )
 
-    if abs(
-        margin_diff
-    ) > 5:
+
+    if abs(margin_diff) > 5:
 
         leader = (
             home
@@ -1209,9 +1381,8 @@ def _cfb_key_factors(
         0,
     )
 
-    if abs(
-        sp_diff
-    ) > 5:
+
+    if abs(sp_diff) > 5:
 
         leader = (
             home
@@ -1233,9 +1404,7 @@ def _cfb_key_factors(
             "impact":
                 (
                     "high"
-                    if abs(
-                        sp_diff
-                    ) > 15
+                    if abs(sp_diff) > 15
                     else "medium"
                 ),
         })
@@ -1253,9 +1422,8 @@ def _cfb_key_factors(
         )
     )
 
-    if abs(
-        off_adv
-    ) > 5:
+
+    if abs(off_adv) > 5:
 
         leader = (
             home
@@ -1312,13 +1480,6 @@ async def weekly_card(
     season: Optional[int] = None,
 ):
 
-    """
-    Generate weekly slate with:
-    - model predictions
-    - line disparity
-    - edge rankings
-    """
-
     if not app_state[
         "ready"
     ]:
@@ -1326,9 +1487,11 @@ async def weekly_card(
         raise HTTPException(
             status_code=503,
             detail=(
-                "Models still training."
+                "Models are still initializing. "
+                "Check /health and try again shortly."
             ),
         )
+
 
     if league.upper() not in (
         "NFL",
@@ -1341,6 +1504,7 @@ async def weekly_card(
                 "League must be NFL or CFB"
             ),
         )
+
 
     try:
 
@@ -1366,6 +1530,10 @@ async def weekly_card(
         )
 
     except Exception as exc:
+
+        logger.exception(
+            "Weekly card generation failed."
+        )
 
         raise HTTPException(
             status_code=500,
@@ -1415,8 +1583,7 @@ def team_profile(
             status_code=404,
             detail=(
                 f"Team '{team_name}' "
-                f"not in roster DB. "
-                f"Add players first."
+                f"not in roster DB."
             ),
         )
 
@@ -1562,8 +1729,7 @@ async def sync_roster_moves(
     )
 
     return await ingest_player_moves(
-        league=
-            league
+        league=league
     )
 
 
@@ -1576,7 +1742,9 @@ async def get_injuries(
     league: str,
 ):
 
-    league = league.upper()
+    league = (
+        league.upper()
+    )
 
     all_injuries = (
         injury_engine.get_all_injuries(
@@ -1617,6 +1785,7 @@ async def refresh_injuries(
         secret
     )
 
+
     if league.upper() == "NFL":
 
         injuries = (
@@ -1628,9 +1797,9 @@ async def refresh_injuries(
             "NFL",
         )
 
+
     else:
 
-        # Ensure teams are available before using IDs.
         if not app_state[
             "cfb_teams"
         ]:
@@ -1650,6 +1819,7 @@ async def refresh_injuries(
                     ),
                 )
 
+
         team_ids = [
             team["id"]
             for team
@@ -1662,6 +1832,7 @@ async def refresh_injuries(
             )
         ]
 
+
         injuries = (
             await injury_engine.fetch_cfb_injuries(
                 team_ids
@@ -1672,6 +1843,7 @@ async def refresh_injuries(
             injuries,
             "CFB",
         )
+
 
     return {
         "refreshed":
@@ -1690,7 +1862,9 @@ def team_injuries(
     league: str = "NFL",
 ):
 
-    league = league.upper()
+    league = (
+        league.upper()
+    )
 
     injuries = (
         injury_engine.get_team_injuries(
@@ -1736,7 +1910,9 @@ async def line_movement(
     window_hours: int = 24,
 ):
 
-    league = league.upper()
+    league = (
+        league.upper()
+    )
 
     movements = (
         snapshotter.get_all_movements(
