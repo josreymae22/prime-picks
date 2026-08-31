@@ -41,59 +41,6 @@ const NFL_TEAMS = [
   "Washington Commanders",
 ];
 
-const CFB_TOP_TEAMS = [
-  "Alabama",
-  "Georgia",
-  "Ohio State",
-  "Michigan",
-  "Texas",
-  "Penn State",
-  "Notre Dame",
-  "LSU",
-  "USC",
-  "Oregon",
-  "Florida State",
-  "Clemson",
-  "Oklahoma",
-  "Tennessee",
-  "Utah",
-  "Washington",
-  "Missouri",
-  "Ole Miss",
-  "Kansas State",
-  "Iowa",
-  "Wisconsin",
-  "Auburn",
-  "Florida",
-  "Miami",
-  "Texas A&M",
-  "Colorado",
-  "Louisville",
-  "Pittsburgh",
-  "NC State",
-  "North Carolina",
-  "Duke",
-  "Virginia Tech",
-  "TCU",
-  "Baylor",
-  "Oklahoma State",
-  "Iowa State",
-  "Cincinnati",
-  "Houston",
-  "UCF",
-  "Tulane",
-  "Air Force",
-  "Boise State",
-  "UNLV",
-  "San Diego State",
-  "Wyoming",
-  "Marshall",
-  "James Madison",
-  "Liberty",
-  "Appalachian State",
-  "Coastal Carolina",
-];
-
 type Prediction = {
   predicted_home_score: number;
   predicted_away_score: number;
@@ -121,6 +68,14 @@ type PredictResult = {
   key_factors: Factor[];
 };
 
+type CfbTeam = {
+  id?: number | string;
+  school?: string;
+  name?: string;
+  displayName?: string;
+  abbreviation?: string;
+};
+
 const impactColor = {
   high: "#C9A84C",
   medium: "#8B9BB4",
@@ -141,10 +96,16 @@ export default function Home() {
   const [homeTeam, setHomeTeam] = useState("");
   const [awayTeam, setAwayTeam] = useState("");
   const [neutral, setNeutral] = useState(false);
+
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<PredictResult | null>(null);
   const [error, setError] = useState("");
+
   const [apiReady, setApiReady] = useState<boolean | null>(null);
+
+  const [cfbTeams, setCfbTeams] = useState<string[]>([]);
+  const [cfbTeamsLoading, setCfbTeamsLoading] = useState(false);
+  const [cfbTeamsError, setCfbTeamsError] = useState("");
 
   useEffect(() => {
     if (!authLoading && (!user || userStatus !== "approved")) {
@@ -155,11 +116,76 @@ export default function Home() {
   useEffect(() => {
     axios
       .get(`${API}/health`)
-      .then((r) => setApiReady(r.data.ready))
+      .then((r) => setApiReady(Boolean(r.data.ready)))
       .catch(() => setApiReady(false));
   }, []);
 
-  const teams = league === "NFL" ? NFL_TEAMS : CFB_TOP_TEAMS;
+  useEffect(() => {
+    if (league !== "CFB") {
+      return;
+    }
+
+    if (cfbTeams.length > 0) {
+      return;
+    }
+
+    const loadCfbTeams = async () => {
+      setCfbTeamsLoading(true);
+      setCfbTeamsError("");
+
+      try {
+        const response = await axios.get(`${API}/teams/cfb`);
+
+        const rawTeams: CfbTeam[] = Array.isArray(response.data)
+          ? response.data
+          : [];
+
+        const names = rawTeams
+          .map((team) => {
+            return (
+              team.school ||
+              team.displayName ||
+              team.name ||
+              ""
+            ).trim();
+          })
+          .filter(Boolean);
+
+        const uniqueTeams = Array.from(new Set(names)).sort((a, b) =>
+          a.localeCompare(b),
+        );
+
+        setCfbTeams(uniqueTeams);
+
+        if (uniqueTeams.length === 0) {
+          setCfbTeamsError("No NCAAF teams were returned by the API.");
+        }
+      } catch (err: any) {
+        console.error("Failed to load CFB teams:", err);
+
+        setCfbTeams([]);
+        setCfbTeamsError(
+          err?.response?.data?.detail ||
+            "Unable to load NCAAF teams from the API.",
+        );
+      } finally {
+        setCfbTeamsLoading(false);
+      }
+    };
+
+    loadCfbTeams();
+  }, [league, cfbTeams.length]);
+
+  const teams = league === "NFL" ? NFL_TEAMS : cfbTeams;
+
+  const handleLeagueChange = (newLeague: "NFL" | "CFB") => {
+    setLeague(newLeague);
+    setHomeTeam("");
+    setAwayTeam("");
+    setResult(null);
+    setError("");
+    setNeutral(false);
+  };
 
   const handlePredict = useCallback(async () => {
     if (!homeTeam || !awayTeam) {
@@ -187,7 +213,8 @@ export default function Home() {
       setResult(r.data);
     } catch (e: any) {
       setError(
-        e?.response?.data?.detail || "Prediction failed. Is the API running?",
+        e?.response?.data?.detail ||
+          "Prediction failed. Is the API running?",
       );
     } finally {
       setLoading(false);
@@ -199,7 +226,10 @@ export default function Home() {
       <div className="field-bg min-h-screen flex items-center justify-center">
         <div
           className="animate-pulse-gold score-display text-slate"
-          style={{ fontSize: 18, letterSpacing: "0.1em" }}
+          style={{
+            fontSize: 18,
+            letterSpacing: "0.1em",
+          }}
         >
           LOADING...
         </div>
@@ -215,8 +245,14 @@ export default function Home() {
     <>
       <Head>
         <title>Prime Picks</title>
-        <meta name="description" content="NFL & CFB score prediction engine" />
-        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <meta
+          name="description"
+          content="NFL & CFB score prediction engine"
+        />
+        <meta
+          name="viewport"
+          content="width=device-width, initial-scale=1"
+        />
       </Head>
 
       <div className="field-bg min-h-screen px-4 py-10 md:py-16">
@@ -224,9 +260,14 @@ export default function Home() {
           <div className="flex items-center justify-between mb-2">
             <div className="flex items-center gap-3">
               <span style={{ fontSize: 28 }}>🏈</span>
+
               <h1
                 className="score-display text-chalk"
-                style={{ fontSize: 42, letterSpacing: "0.08em", lineHeight: 1 }}
+                style={{
+                  fontSize: 42,
+                  letterSpacing: "0.08em",
+                  lineHeight: 1,
+                }}
               >
                 PRIME PICKS
               </h1>
@@ -234,18 +275,43 @@ export default function Home() {
 
             <nav
               className="flex gap-4 text-xs"
-              style={{ fontFamily: "var(--font-mono)" }}
+              style={{
+                fontFamily: "var(--font-mono)",
+              }}
             >
-              <a href="/" style={{ color: "#C9A84C" }}>
+              <a
+                href="/"
+                style={{
+                  color: "#C9A84C",
+                }}
+              >
                 Predict
               </a>
-              <a href="/card" style={{ color: "#8B9BB4" }}>
+
+              <a
+                href="/card"
+                style={{
+                  color: "#8B9BB4",
+                }}
+              >
                 Weekly Card
               </a>
-              <a href="/roster" style={{ color: "#8B9BB4" }}>
+
+              <a
+                href="/roster"
+                style={{
+                  color: "#8B9BB4",
+                }}
+              >
                 Roster Intel
               </a>
-              <a href="/record" style={{ color: "#8B9BB4" }}>
+
+              <a
+                href="/record"
+                style={{
+                  color: "#8B9BB4",
+                }}
+              >
                 Record
               </a>
             </nav>
@@ -253,17 +319,25 @@ export default function Home() {
             <div className="flex items-center gap-3">
               <span
                 className="text-xs text-slate hidden md:block"
-                style={{ fontFamily: "var(--font-mono)" }}
+                style={{
+                  fontFamily: "var(--font-mono)",
+                }}
               >
                 {user?.email}
               </span>
+
               <button
-                onClick={() => signOut().then(() => router.replace("/login"))}
+                onClick={() =>
+                  signOut().then(() =>
+                    router.replace("/login"),
+                  )
+                }
                 className="text-xs px-3 py-1.5 rounded"
                 style={{
                   fontFamily: "var(--font-mono)",
                   color: "#8B9BB4",
-                  border: "1px solid rgba(201,168,76,0.2)",
+                  border:
+                    "1px solid rgba(201,168,76,0.2)",
                   background: "transparent",
                   cursor: "pointer",
                 }}
@@ -275,7 +349,9 @@ export default function Home() {
 
           <p
             className="text-slate text-sm"
-            style={{ fontFamily: "var(--font-body)" }}
+            style={{
+              fontFamily: "var(--font-body)",
+            }}
           >
             Score margin & total prediction engine — NFL & NCAAF
           </p>
@@ -296,9 +372,12 @@ export default function Home() {
                       : "#D94040",
               }}
             />
+
             <span
               className="text-xs text-slate"
-              style={{ fontFamily: "var(--font-mono)" }}
+              style={{
+                fontFamily: "var(--font-mono)",
+              }}
             >
               {apiReady === null
                 ? "Checking API..."
@@ -314,20 +393,23 @@ export default function Home() {
             {(["NFL", "CFB"] as const).map((l) => (
               <button
                 key={l}
-                onClick={() => {
-                  setLeague(l);
-                  setHomeTeam("");
-                  setAwayTeam("");
-                  setResult(null);
-                }}
+                onClick={() => handleLeagueChange(l)}
                 className="score-display px-6 py-2 rounded text-sm transition-all"
                 style={{
-                  background: league === l ? "#C9A84C" : "rgba(15,44,71,0.4)",
-                  color: league === l ? "#030B14" : "#8B9BB4",
+                  background:
+                    league === l
+                      ? "#C9A84C"
+                      : "rgba(15,44,71,0.4)",
+                  color:
+                    league === l
+                      ? "#030B14"
+                      : "#8B9BB4",
                   letterSpacing: "0.1em",
                   border: "1px solid",
                   borderColor:
-                    league === l ? "#C9A84C" : "rgba(201,168,76,0.15)",
+                    league === l
+                      ? "#C9A84C"
+                      : "rgba(201,168,76,0.15)",
                   cursor: "pointer",
                   fontSize: 18,
                 }}
@@ -337,22 +419,67 @@ export default function Home() {
             ))}
           </div>
 
+          {league === "CFB" && cfbTeamsLoading && (
+            <div
+              className="mb-4 px-3 py-2 rounded text-sm"
+              style={{
+                background: "rgba(201,168,76,0.08)",
+                color: "#C9A84C",
+                border:
+                  "1px solid rgba(201,168,76,0.18)",
+                fontFamily: "var(--font-mono)",
+              }}
+            >
+              Loading NCAAF teams...
+            </div>
+          )}
+
+          {league === "CFB" && cfbTeamsError && (
+            <div
+              className="mb-4 px-3 py-2 rounded text-sm"
+              style={{
+                background: "rgba(217,64,64,0.1)",
+                color: "#D94040",
+                border:
+                  "1px solid rgba(217,64,64,0.2)",
+              }}
+            >
+              {cfbTeamsError}
+            </div>
+          )}
+
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
             <div>
               <label
                 className="block text-xs text-slate mb-1 uppercase tracking-widest"
-                style={{ fontFamily: "var(--font-mono)" }}
+                style={{
+                  fontFamily: "var(--font-mono)",
+                }}
               >
                 Home Team
               </label>
+
               <select
                 className="w-full rounded px-3 py-2.5 text-sm"
                 value={homeTeam}
-                onChange={(e) => setHomeTeam(e.target.value)}
+                onChange={(e) =>
+                  setHomeTeam(e.target.value)
+                }
+                disabled={
+                  league === "CFB" && cfbTeamsLoading
+                }
               >
-                <option value="">Select team...</option>
+                <option value="">
+                  {league === "CFB" && cfbTeamsLoading
+                    ? "Loading teams..."
+                    : "Select team..."}
+                </option>
+
                 {teams.map((t) => (
-                  <option key={t} value={t}>
+                  <option
+                    key={t}
+                    value={t}
+                  >
                     {t}
                   </option>
                 ))}
@@ -362,18 +489,34 @@ export default function Home() {
             <div>
               <label
                 className="block text-xs text-slate mb-1 uppercase tracking-widest"
-                style={{ fontFamily: "var(--font-mono)" }}
+                style={{
+                  fontFamily: "var(--font-mono)",
+                }}
               >
                 Away Team
               </label>
+
               <select
                 className="w-full rounded px-3 py-2.5 text-sm"
                 value={awayTeam}
-                onChange={(e) => setAwayTeam(e.target.value)}
+                onChange={(e) =>
+                  setAwayTeam(e.target.value)
+                }
+                disabled={
+                  league === "CFB" && cfbTeamsLoading
+                }
               >
-                <option value="">Select team...</option>
+                <option value="">
+                  {league === "CFB" && cfbTeamsLoading
+                    ? "Loading teams..."
+                    : "Select team..."}
+                </option>
+
                 {teams.map((t) => (
-                  <option key={t} value={t}>
+                  <option
+                    key={t}
+                    value={t}
+                  >
                     {t}
                   </option>
                 ))}
@@ -381,15 +524,34 @@ export default function Home() {
             </div>
           </div>
 
+          {league === "CFB" &&
+            !cfbTeamsLoading &&
+            cfbTeams.length > 0 && (
+              <div
+                className="text-xs text-slate mb-4"
+                style={{
+                  fontFamily: "var(--font-mono)",
+                  opacity: 0.7,
+                }}
+              >
+                {cfbTeams.length} NCAAF teams loaded
+              </div>
+            )}
+
           <div className="flex items-center gap-2 mb-6">
             <input
               type="checkbox"
               id="neutral"
               checked={neutral}
-              onChange={(e) => setNeutral(e.target.checked)}
+              onChange={(e) =>
+                setNeutral(e.target.checked)
+              }
               className="w-4 h-4"
-              style={{ accentColor: "#C9A84C" }}
+              style={{
+                accentColor: "#C9A84C",
+              }}
             />
+
             <label
               htmlFor="neutral"
               className="text-sm text-slate cursor-pointer"
@@ -404,7 +566,8 @@ export default function Home() {
               style={{
                 background: "rgba(217,64,64,0.1)",
                 color: "#D94040",
-                border: "1px solid rgba(217,64,64,0.2)",
+                border:
+                  "1px solid rgba(217,64,64,0.2)",
               }}
             >
               {error}
@@ -413,22 +576,47 @@ export default function Home() {
 
           <button
             onClick={handlePredict}
-            disabled={loading || !homeTeam || !awayTeam}
+            disabled={
+              loading ||
+              !homeTeam ||
+              !awayTeam ||
+              (league === "CFB" &&
+                cfbTeamsLoading)
+            }
             className="w-full score-display py-3 rounded transition-all"
             style={{
               fontSize: 22,
               letterSpacing: "0.12em",
               background:
-                loading || !homeTeam || !awayTeam
+                loading ||
+                !homeTeam ||
+                !awayTeam ||
+                (league === "CFB" &&
+                  cfbTeamsLoading)
                   ? "rgba(201,168,76,0.2)"
                   : "linear-gradient(135deg, #C9A84C, #E8C96A)",
-              color: loading || !homeTeam || !awayTeam ? "#4A5568" : "#030B14",
+              color:
+                loading ||
+                !homeTeam ||
+                !awayTeam ||
+                (league === "CFB" &&
+                  cfbTeamsLoading)
+                  ? "#4A5568"
+                  : "#030B14",
               cursor:
-                loading || !homeTeam || !awayTeam ? "not-allowed" : "pointer",
+                loading ||
+                !homeTeam ||
+                !awayTeam ||
+                (league === "CFB" &&
+                  cfbTeamsLoading)
+                  ? "not-allowed"
+                  : "pointer",
               border: "none",
             }}
           >
-            {loading ? "⚡ COMPUTING..." : "PREDICT SCORE"}
+            {loading
+              ? "⚡ COMPUTING..."
+              : "PREDICT SCORE"}
           </button>
         </div>
 
@@ -437,11 +625,19 @@ export default function Home() {
             <div className="panel-bright rounded-xl p-6 md:p-8 mb-4">
               <div
                 className="text-xs text-slate mb-4 uppercase tracking-widest"
-                style={{ fontFamily: "var(--font-mono)" }}
+                style={{
+                  fontFamily: "var(--font-mono)",
+                }}
               >
                 Predicted Final Score
+
                 {!result.prediction.model_trained && (
-                  <span className="ml-2 text-gold" style={{ color: "#C9A84C" }}>
+                  <span
+                    className="ml-2 text-gold"
+                    style={{
+                      color: "#C9A84C",
+                    }}
+                  >
                     · stat-based fallback (model training)
                   </span>
                 )}
@@ -451,19 +647,34 @@ export default function Home() {
                 <div className="text-center flex-1">
                   <div
                     className="text-slate text-xs uppercase tracking-widest mb-1"
-                    style={{ fontFamily: "var(--font-mono)" }}
+                    style={{
+                      fontFamily: "var(--font-mono)",
+                    }}
                   >
                     {result.home_team}
                   </div>
+
                   <div
                     className="score-display"
-                    style={{ fontSize: 72, color: "#F0EEE6", lineHeight: 1 }}
+                    style={{
+                      fontSize: 72,
+                      color: "#F0EEE6",
+                      lineHeight: 1,
+                    }}
                   >
-                    {Math.round(result.prediction.predicted_home_score)}
+                    {Math.round(
+                      result.prediction
+                        .predicted_home_score,
+                    )}
                   </div>
+
                   <div
                     className="text-xs mt-1"
-                    style={{ color: "#C9A84C", fontFamily: "var(--font-mono)" }}
+                    style={{
+                      color: "#C9A84C",
+                      fontFamily:
+                        "var(--font-mono)",
+                    }}
                   >
                     HOME · {homeProb}%
                   </div>
@@ -472,7 +683,9 @@ export default function Home() {
                 <div>
                   <div
                     className="score-display text-slate"
-                    style={{ fontSize: 36 }}
+                    style={{
+                      fontSize: 36,
+                    }}
                   >
                     VS
                   </div>
@@ -481,19 +694,34 @@ export default function Home() {
                 <div className="text-center flex-1">
                   <div
                     className="text-slate text-xs uppercase tracking-widest mb-1"
-                    style={{ fontFamily: "var(--font-mono)" }}
+                    style={{
+                      fontFamily: "var(--font-mono)",
+                    }}
                   >
                     {result.away_team}
                   </div>
+
                   <div
                     className="score-display"
-                    style={{ fontSize: 72, color: "#F0EEE6", lineHeight: 1 }}
+                    style={{
+                      fontSize: 72,
+                      color: "#F0EEE6",
+                      lineHeight: 1,
+                    }}
                   >
-                    {Math.round(result.prediction.predicted_away_score)}
+                    {Math.round(
+                      result.prediction
+                        .predicted_away_score,
+                    )}
                   </div>
+
                   <div
                     className="text-xs mt-1"
-                    style={{ color: "#8B9BB4", fontFamily: "var(--font-mono)" }}
+                    style={{
+                      color: "#8B9BB4",
+                      fontFamily:
+                        "var(--font-mono)",
+                    }}
                   >
                     AWAY · {awayProb}%
                   </div>
@@ -504,46 +732,97 @@ export default function Home() {
                 <div className="confidence-band rounded px-3 py-3">
                   <div
                     className="text-xs text-slate uppercase tracking-widest mb-1"
-                    style={{ fontFamily: "var(--font-mono)" }}
+                    style={{
+                      fontFamily:
+                        "var(--font-mono)",
+                    }}
                   >
                     Score Margin
                   </div>
+
                   <div
                     className="score-display"
-                    style={{ fontSize: 28, color: "#C9A84C" }}
+                    style={{
+                      fontSize: 28,
+                      color: "#C9A84C",
+                    }}
                   >
-                    {result.prediction.predicted_margin > 0
-                      ? `${result.home_team.split(" ").pop()} +${Math.abs(result.prediction.predicted_margin).toFixed(1)}`
-                      : `${result.away_team.split(" ").pop()} +${Math.abs(result.prediction.predicted_margin).toFixed(1)}`}
+                    {result.prediction
+                      .predicted_margin > 0
+                      ? `${result.home_team
+                          .split(" ")
+                          .pop()} +${Math.abs(
+                          result.prediction
+                            .predicted_margin,
+                        ).toFixed(1)}`
+                      : `${result.away_team
+                          .split(" ")
+                          .pop()} +${Math.abs(
+                          result.prediction
+                            .predicted_margin,
+                        ).toFixed(1)}`}
                   </div>
+
                   <div
                     className="text-xs text-slate mt-1"
-                    style={{ fontFamily: "var(--font-mono)" }}
+                    style={{
+                      fontFamily:
+                        "var(--font-mono)",
+                    }}
                   >
-                    80% CI: {result.prediction.margin_80_lo.toFixed(1)} to +
-                    {result.prediction.margin_80_hi.toFixed(1)}
+                    80% CI:{" "}
+                    {result.prediction.margin_80_lo.toFixed(
+                      1,
+                    )}{" "}
+                    to{" "}
+                    {result.prediction.margin_80_hi >=
+                    0
+                      ? "+"
+                      : ""}
+                    {result.prediction.margin_80_hi.toFixed(
+                      1,
+                    )}
                   </div>
                 </div>
 
                 <div className="confidence-band rounded px-3 py-3">
                   <div
                     className="text-xs text-slate uppercase tracking-widest mb-1"
-                    style={{ fontFamily: "var(--font-mono)" }}
+                    style={{
+                      fontFamily:
+                        "var(--font-mono)",
+                    }}
                   >
                     Predicted Total
                   </div>
+
                   <div
                     className="score-display"
-                    style={{ fontSize: 28, color: "#C9A84C" }}
+                    style={{
+                      fontSize: 28,
+                      color: "#C9A84C",
+                    }}
                   >
-                    {result.prediction.predicted_total.toFixed(1)}
+                    {result.prediction.predicted_total.toFixed(
+                      1,
+                    )}
                   </div>
+
                   <div
                     className="text-xs text-slate mt-1"
-                    style={{ fontFamily: "var(--font-mono)" }}
+                    style={{
+                      fontFamily:
+                        "var(--font-mono)",
+                    }}
                   >
-                    80% CI: {result.prediction.total_80_lo.toFixed(1)} —{" "}
-                    {result.prediction.total_80_hi.toFixed(1)}
+                    80% CI:{" "}
+                    {result.prediction.total_80_lo.toFixed(
+                      1,
+                    )}{" "}
+                    —{" "}
+                    {result.prediction.total_80_hi.toFixed(
+                      1,
+                    )}
                   </div>
                 </div>
               </div>
@@ -553,44 +832,71 @@ export default function Home() {
               <div className="panel rounded-xl p-6">
                 <div
                   className="text-xs text-slate mb-4 uppercase tracking-widest"
-                  style={{ fontFamily: "var(--font-mono)" }}
+                  style={{
+                    fontFamily:
+                      "var(--font-mono)",
+                  }}
                 >
                   Key Factors
                 </div>
+
                 <div className="space-y-3">
-                  {result.key_factors.map((f, i) => (
-                    <div key={i} className="flex items-start gap-3">
-                      <span
-                        className="text-xs rounded px-1.5 py-0.5 mt-0.5 shrink-0"
-                        style={{
-                          fontFamily: "var(--font-mono)",
-                          background: `${impactColor[f.impact]}18`,
-                          color: impactColor[f.impact],
-                          border: `1px solid ${impactColor[f.impact]}40`,
-                        }}
+                  {result.key_factors.map(
+                    (f, i) => (
+                      <div
+                        key={i}
+                        className="flex items-start gap-3"
                       >
-                        {impactLabel[f.impact]}
-                      </span>
-                      <div>
-                        <div className="text-sm font-medium text-chalk">
-                          {f.label}
-                        </div>
-                        <div className="text-xs text-slate mt-0.5">
-                          {f.detail}
+                        <span
+                          className="text-xs rounded px-1.5 py-0.5 mt-0.5 shrink-0"
+                          style={{
+                            fontFamily:
+                              "var(--font-mono)",
+                            background: `${impactColor[f.impact]}18`,
+                            color:
+                              impactColor[
+                                f.impact
+                              ],
+                            border: `1px solid ${
+                              impactColor[
+                                f.impact
+                              ]
+                            }40`,
+                          }}
+                        >
+                          {
+                            impactLabel[
+                              f.impact
+                            ]
+                          }
+                        </span>
+
+                        <div>
+                          <div className="text-sm font-medium text-chalk">
+                            {f.label}
+                          </div>
+
+                          <div className="text-xs text-slate mt-0.5">
+                            {f.detail}
+                          </div>
                         </div>
                       </div>
-                    </div>
-                  ))}
+                    ),
+                  )}
                 </div>
               </div>
             )}
 
             <p
               className="text-center text-xs text-slate mt-4"
-              style={{ fontFamily: "var(--font-mono)", opacity: 0.5 }}
+              style={{
+                fontFamily: "var(--font-mono)",
+                opacity: 0.5,
+              }}
             >
-              Statistical model only. Confidence intervals reflect typical
-              prediction error (~9–14 pt RMSE). Not financial advice.
+              Statistical model only. Confidence intervals
+              reflect typical prediction error (~9–14 pt RMSE).
+              Not financial advice.
             </p>
           </div>
         )}
