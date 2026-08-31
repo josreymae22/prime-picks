@@ -2483,24 +2483,12 @@ async def weekly_card(
 
         return (
             await generate_weekly_card(
-                league=
-                    league.upper(),
-
-                week=
-                    week,
-
-                season=
-                    season,
-
-                nfl_team_stats=
-                    app_state[
-                        "nfl_team_stats"
-                    ],
-
-                cfb_sp_lookup=
-                    app_state[
-                        "cfb_sp_lookup"
-                    ],
+    league=league.upper(),
+    week=week,
+    season=season,
+    nfl_team_stats=app_state["nfl_team_stats"],
+    cfb_sp_lookup=app_state["cfb_sp_lookup"],
+    cfb_team_stats=app_state["cfb_team_stats"],
             )
         )
 
