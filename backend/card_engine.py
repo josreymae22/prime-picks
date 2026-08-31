@@ -8,11 +8,17 @@ Generates the weekly Prime Picks card:
   4. Apply roster adjustments
   5. Apply injury adjustments
   6. Apply line movement features
-  7. Rank games by edge size
+  7. Rank games by confidence-adjusted edge size
 
 CFB prediction behavior:
 - Both teams have SP+ -> trained CFB model
 - Missing SP+ for either team -> historical scoring fallback
+
+Confidence behavior:
+- Trained model edges retain normal scoring/ranking
+- Historical CFB fallback edges retain their raw Vegas disagreement
+- Historical fallback edges receive a reduced ranking score
+- Historical fallback games cannot be presented as Strong Edges
 """
 
 import logging
@@ -66,6 +72,10 @@ def _normal_cdf(value: float) -> float:
     )
 
 
+# ============================================================
+# CFB fallback prediction
+# ============================================================
+
 def predict_cfb_fallback(
     home_team: str,
     away_team: str,
@@ -91,7 +101,6 @@ def predict_cfb_fallback(
         "games": 0,
     }
 
-
     home = team_stats.get(
         home_team,
         default_profile,
@@ -102,13 +111,11 @@ def predict_cfb_fallback(
         default_profile,
     )
 
-
     hfa = (
         0.0
         if neutral_site
         else 3.0
     )
-
 
     # --------------------------------------------------------
     # Base scoring projection
@@ -125,7 +132,6 @@ def predict_cfb_fallback(
         hfa / 2.0
     )
 
-
     away_score = (
         (
             away["avg_pts_for"]
@@ -137,7 +143,6 @@ def predict_cfb_fallback(
         hfa / 2.0
     )
 
-
     # --------------------------------------------------------
     # Recent form adjustment
     # --------------------------------------------------------
@@ -148,7 +153,6 @@ def predict_cfb_fallback(
         away["avg_margin"]
     )
 
-
     form_adjustment = max(
         -6.0,
         min(
@@ -156,7 +160,6 @@ def predict_cfb_fallback(
             form_edge * 0.20,
         ),
     )
-
 
     home_score += (
         form_adjustment / 2.0
@@ -166,9 +169,8 @@ def predict_cfb_fallback(
         form_adjustment / 2.0
     )
 
-
     # --------------------------------------------------------
-    # Reasonable bounds
+    # Reasonable football bounds
     # --------------------------------------------------------
 
     home_score = max(
@@ -187,7 +189,6 @@ def predict_cfb_fallback(
         ),
     )
 
-
     margin = (
         home_score
         -
@@ -200,10 +201,8 @@ def predict_cfb_fallback(
         away_score
     )
 
-
     margin_rmse = 14.0
     total_rmse = 18.0
-
 
     margin_lo = (
         margin
@@ -229,7 +228,6 @@ def predict_cfb_fallback(
         1.28 * total_rmse
     )
 
-
     home_win_prob = (
         _normal_cdf(
             margin
@@ -238,101 +236,80 @@ def predict_cfb_fallback(
         )
     )
 
-
     prediction = {
-        "predicted_home_score":
-            round(
-                home_score,
-                1,
-            ),
+        "predicted_home_score": round(
+            home_score,
+            1,
+        ),
 
-        "predicted_away_score":
-            round(
-                away_score,
-                1,
-            ),
+        "predicted_away_score": round(
+            away_score,
+            1,
+        ),
 
-        "predicted_margin":
-            round(
-                margin,
-                1,
-            ),
+        "predicted_margin": round(
+            margin,
+            1,
+        ),
 
-        "predicted_total":
-            round(
-                total,
-                1,
-            ),
+        "predicted_total": round(
+            total,
+            1,
+        ),
 
-        "margin_80_lo":
-            round(
-                margin_lo,
-                1,
-            ),
+        "margin_80_lo": round(
+            margin_lo,
+            1,
+        ),
 
-        "margin_80_hi":
-            round(
-                margin_hi,
-                1,
-            ),
+        "margin_80_hi": round(
+            margin_hi,
+            1,
+        ),
 
-        "total_80_lo":
-            round(
-                total_lo,
-                1,
-            ),
+        "total_80_lo": round(
+            total_lo,
+            1,
+        ),
 
-        "total_80_hi":
-            round(
-                total_hi,
-                1,
-            ),
+        "total_80_hi": round(
+            total_hi,
+            1,
+        ),
 
-        "home_win_prob":
-            round(
-                float(
-                    home_win_prob
-                ),
-                3,
-            ),
+        "home_win_prob": round(
+            float(home_win_prob),
+            3,
+        ),
 
-        "model_trained":
-            False,
-
-        "prediction_mode":
-            "historical_fallback",
+        "model_trained": False,
+        "prediction_mode": "historical_fallback",
     }
-
 
     diagnostics = {
-        "home_recent_profile":
-            home,
+        "home_recent_profile": home,
+        "away_recent_profile": away,
 
-        "away_recent_profile":
-            away,
+        "home_field_advantage": hfa,
 
-        "home_field_advantage":
-            hfa,
+        "recent_form_edge": round(
+            form_edge,
+            2,
+        ),
 
-        "recent_form_edge":
-            round(
-                form_edge,
-                2,
-            ),
+        "recent_form_adjustment": round(
+            form_adjustment,
+            2,
+        ),
 
-        "recent_form_adjustment":
-            round(
-                form_adjustment,
-                2,
-            ),
+        "home_history_available": (
+            home["games"] > 0
+        ),
 
-        "home_history_available":
-            home["games"] > 0,
-
-        "away_history_available":
-            away["games"] > 0,
+        "away_history_available": (
+            away["games"] > 0
+        ),
     }
-
 
     return (
         prediction,
@@ -369,7 +346,6 @@ def apply_all_adjustments(
         "movement": {},
     }
 
-
     # --------------------------------------------------------
     # Roster
     # --------------------------------------------------------
@@ -387,7 +363,6 @@ def apply_all_adjustments(
         )
         or 0.0
     )
-
 
     # --------------------------------------------------------
     # Injuries
@@ -409,7 +384,6 @@ def apply_all_adjustments(
         )
     )
 
-
     home_injury_adj = (
         home_inj.get(
             "adjustment",
@@ -423,7 +397,6 @@ def apply_all_adjustments(
             0.0,
         )
     )
-
 
     # --------------------------------------------------------
     # Movement
@@ -442,7 +415,6 @@ def apply_all_adjustments(
             away_team,
         )
     )
-
 
     # --------------------------------------------------------
     # Generic adjustments
@@ -463,7 +435,6 @@ def apply_all_adjustments(
     adjusted["away_injury_adj"] = (
         away_injury_adj
     )
-
 
     # --------------------------------------------------------
     # NFL readable margin
@@ -493,12 +464,10 @@ def apply_all_adjustments(
             away_injury_adj
         )
 
-
     # --------------------------------------------------------
     # CFB SP+ adjustment
     #
-    # Only modify SP+ if BOTH teams actually have SP+.
-    # This avoids rebuilding a fake SP difference.
+    # Only modify SP+ if BOTH teams have SP+ data.
     # --------------------------------------------------------
 
     if (
@@ -507,8 +476,7 @@ def apply_all_adjustments(
             False,
         )
         and
-        "home_sp_overall"
-        in adjusted
+        "home_sp_overall" in adjusted
     ):
 
         adjusted["home_sp_overall"] = (
@@ -543,15 +511,13 @@ def apply_all_adjustments(
             ]
         )
 
-
     # --------------------------------------------------------
-    # Line movement features
+    # Line movement
     # --------------------------------------------------------
 
     adjusted.update(
         movement_feats
     )
-
 
     summary.update({
         "home_roster_adj":
@@ -594,7 +560,6 @@ def apply_all_adjustments(
             movement_data,
     })
 
-
     return (
         adjusted,
         summary,
@@ -615,7 +580,6 @@ def apply_fallback_margin_adjustments(
     """
 
     result = prediction.copy()
-
 
     home_adj = (
         adj_summary.get(
@@ -641,20 +605,14 @@ def apply_fallback_margin_adjustments(
         )
     )
 
-
     net_adjustment = (
         home_adj
         -
         away_adj
     )
 
-
-    if abs(
-        net_adjustment
-    ) < 0.01:
-
+    if abs(net_adjustment) < 0.01:
         return result
-
 
     home_score = (
         result.get(
@@ -674,7 +632,6 @@ def apply_fallback_margin_adjustments(
         net_adjustment / 2.0
     )
 
-
     home_score = max(
         0,
         home_score,
@@ -684,7 +641,6 @@ def apply_fallback_margin_adjustments(
         0,
         away_score,
     )
-
 
     margin = (
         home_score
@@ -697,7 +653,6 @@ def apply_fallback_margin_adjustments(
         +
         away_score
     )
-
 
     result[
         "predicted_home_score"
@@ -727,7 +682,6 @@ def apply_fallback_margin_adjustments(
         1,
     )
 
-
     margin_rmse = 14.0
 
     result[
@@ -740,7 +694,6 @@ def apply_fallback_margin_adjustments(
         ),
         3,
     )
-
 
     result[
         "margin_80_lo"
@@ -759,7 +712,6 @@ def apply_fallback_margin_adjustments(
         1.28 * margin_rmse,
         1,
     )
-
 
     return result
 
@@ -787,7 +739,6 @@ def calculate_disparity(
             "has_line": False,
         }
 
-
     our_margin = prediction.get(
         "predicted_margin",
         0,
@@ -806,26 +757,35 @@ def calculate_disparity(
         "total"
     )
 
-
     result = {
         "has_line": True
     }
 
-
     # --------------------------------------------------------
     # Spread
+    #
+    # Vegas spread is HOME TEAM spread:
+    #   -7.5 = home favored by 7.5
+    #   +7.5 = home underdog by 7.5
+    #
+    # Prime Picks margin:
+    #   +7.5 = home predicted to win by 7.5
+    #   -7.5 = away predicted to win by 7.5
+    #
+    # Therefore Vegas implied home margin = -vegas_spread.
     # --------------------------------------------------------
 
     if vegas_spread is not None:
 
+        vegas_home_margin = (
+            -vegas_spread
+        )
+
         spread_disp = (
             our_margin
             -
-            (
-                -vegas_spread
-            )
+            vegas_home_margin
         )
-
 
         result[
             "spread_disparity"
@@ -838,15 +798,18 @@ def calculate_disparity(
             "vegas_spread"
         ] = vegas_spread
 
+        result[
+            "vegas_home_margin"
+        ] = round(
+            vegas_home_margin,
+            1,
+        )
 
-        if abs(
-            spread_disp
-        ) < 1.5:
+        if abs(spread_disp) < 1.5:
 
             result[
                 "spread_edge_type"
             ] = "neutral"
-
 
         elif (
             our_margin > 0
@@ -858,7 +821,6 @@ def calculate_disparity(
                 "spread_edge_type"
             ] = "fade_away"
 
-
         elif (
             our_margin < 0
             and
@@ -869,20 +831,17 @@ def calculate_disparity(
                 "spread_edge_type"
             ] = "fade_home"
 
-
         elif spread_disp > 0:
 
             result[
                 "spread_edge_type"
             ] = "lean_home"
 
-
         else:
 
             result[
                 "spread_edge_type"
             ] = "lean_away"
-
 
     else:
 
@@ -895,9 +854,12 @@ def calculate_disparity(
         ] = None
 
         result[
-            "spread_edge_type"
+            "vegas_home_margin"
         ] = None
 
+        result[
+            "spread_edge_type"
+        ] = None
 
     # --------------------------------------------------------
     # Total
@@ -911,7 +873,6 @@ def calculate_disparity(
             vegas_total
         )
 
-
         result[
             "total_disparity"
         ] = round(
@@ -923,15 +884,11 @@ def calculate_disparity(
             "vegas_total"
         ] = vegas_total
 
-
-        if abs(
-            total_disp
-        ) < 2:
+        if abs(total_disp) < 2:
 
             result[
                 "total_edge_type"
             ] = "neutral"
-
 
         elif total_disp > 0:
 
@@ -939,13 +896,11 @@ def calculate_disparity(
                 "total_edge_type"
             ] = "lean_over"
 
-
         else:
 
             result[
                 "total_edge_type"
             ] = "lean_under"
-
 
     else:
 
@@ -960,7 +915,6 @@ def calculate_disparity(
         result[
             "total_edge_type"
         ] = None
-
 
     # --------------------------------------------------------
     # Edge score
@@ -986,13 +940,11 @@ def calculate_disparity(
         * 1.5
     )
 
-
     base_edge = (
         spread_score
         +
         total_score
     )
-
 
     # --------------------------------------------------------
     # Sharp movement
@@ -1011,7 +963,6 @@ def calculate_disparity(
 
         sharp = 0.0
 
-
     steam = movement.get(
         "steam_move",
         False,
@@ -1025,7 +976,6 @@ def calculate_disparity(
         "spread_edge_type",
         "neutral",
     )
-
 
     aligned = (
 
@@ -1059,7 +1009,6 @@ def calculate_disparity(
 
     )
 
-
     sharp_bonus = (
         sharp * 8
         if aligned
@@ -1071,7 +1020,6 @@ def calculate_disparity(
         if steam
         else 0.0
     )
-
 
     result[
         "edge_score"
@@ -1086,7 +1034,6 @@ def calculate_disparity(
         ),
         1,
     )
-
 
     result[
         "sharp_aligned"
@@ -1103,7 +1050,6 @@ def calculate_disparity(
         "steam_move"
     ] = steam
 
-
     if result[
         "edge_score"
     ] >= 15:
@@ -1111,7 +1057,6 @@ def calculate_disparity(
         result[
             "edge_label"
         ] = "🔥 Strong Edge"
-
 
     elif result[
         "edge_score"
@@ -1121,7 +1066,6 @@ def calculate_disparity(
             "edge_label"
         ] = "⚡ Moderate Edge"
 
-
     elif result[
         "edge_score"
     ] >= 3:
@@ -1130,13 +1074,154 @@ def calculate_disparity(
             "edge_label"
         ] = "→ Slight Lean"
 
-
     else:
 
         result[
             "edge_label"
         ] = "— Neutral"
 
+    return result
+
+
+# ============================================================
+# Prediction confidence
+# ============================================================
+
+def apply_prediction_confidence(
+    disparity: dict,
+    prediction_mode: str,
+    league: str,
+) -> dict:
+    """
+    Apply confidence weighting WITHOUT changing the actual
+    Vegas-vs-model disagreement.
+
+    edge_score:
+        Original calculated edge. Preserved for API/UI compatibility.
+
+    raw_edge_score:
+        Explicit copy of the unadjusted edge.
+
+    ranking_score:
+        Confidence-adjusted score used to sort Weekly Card.
+
+    CFB historical fallback predictions currently lack complete
+    SP+ / opponent-strength context, so they are ranked more
+    conservatively and cannot receive a Strong Edge label.
+    """
+
+    result = disparity.copy()
+
+    edge_score = result.get(
+        "edge_score"
+    )
+
+    if edge_score is None:
+
+        result[
+            "raw_edge_score"
+        ] = None
+
+        result[
+            "ranking_score"
+        ] = None
+
+        result[
+            "confidence"
+        ] = "unrated"
+
+        result[
+            "low_confidence"
+        ] = False
+
+        return result
+
+    # Preserve actual mathematical edge.
+    result[
+        "raw_edge_score"
+    ] = edge_score
+
+    result[
+        "ranking_score"
+    ] = edge_score
+
+    result[
+        "low_confidence"
+    ] = False
+
+    # --------------------------------------------------------
+    # CFB historical fallback
+    # --------------------------------------------------------
+
+    if (
+        league.upper() == "CFB"
+        and
+        prediction_mode
+        ==
+        "historical_fallback"
+    ):
+
+        result[
+            "confidence"
+        ] = "low"
+
+        result[
+            "low_confidence"
+        ] = True
+
+        # Only 25% of fallback edge strength counts toward
+        # Weekly Card ranking.
+        #
+        # Raw edge remains available for diagnostics.
+        result[
+            "ranking_score"
+        ] = round(
+            edge_score * 0.25,
+            1,
+        )
+
+        if edge_score >= 8:
+
+            result[
+                "edge_label"
+            ] = "⚠ Fallback Lean"
+
+        elif edge_score >= 3:
+
+            result[
+                "edge_label"
+            ] = "→ Fallback Lean"
+
+        else:
+
+            result[
+                "edge_label"
+            ] = "— Neutral"
+
+        return result
+
+    # --------------------------------------------------------
+    # Trained models
+    # --------------------------------------------------------
+
+    if prediction_mode in (
+        "trained_model",
+        "trained_sp_model",
+    ):
+
+        result[
+            "confidence"
+        ] = "standard"
+
+    else:
+
+        result[
+            "confidence"
+        ] = "low"
+
+        result[
+            "low_confidence"
+        ] = True
 
     return result
 
@@ -1152,7 +1237,6 @@ def _format_injury_notes(
 ) -> list[str]:
 
     notes = []
-
 
     for injury in injuries:
 
@@ -1171,7 +1255,6 @@ def _format_injury_notes(
             "",
         )
 
-
         if status in (
             "out",
             "ir",
@@ -1185,7 +1268,6 @@ def _format_injury_notes(
                 f"{status.upper()}"
             )
 
-
         elif status == "doubtful":
 
             notes.append(
@@ -1193,14 +1275,12 @@ def _format_injury_notes(
                 f"({position}) — Doubtful"
             )
 
-
         elif status == "questionable":
 
             notes.append(
                 f"? {name} "
                 f"({position}) — Questionable"
             )
-
 
     for cascade in cascades:
 
@@ -1219,13 +1299,11 @@ def _format_injury_notes(
             "",
         )
 
-
         notes.append(
             f"↓ {starter_out} out → "
             f"{backup_in} in "
             f"({position})"
         )
-
 
     return notes
 
@@ -1248,6 +1326,10 @@ async def generate_weekly_card(
     CFB:
     - SP+ complete -> trained model
     - SP+ incomplete -> historical fallback
+
+    Ranking:
+    - Trained models use normal edge score
+    - Historical CFB fallback uses confidence-adjusted ranking score
     """
 
     league_upper = (
@@ -1259,13 +1341,11 @@ async def generate_weekly_card(
         or {}
     )
 
-
     logger.info(
         "Generating %s Week %s card...",
         league_upper,
         week,
     )
-
 
     # ========================================================
     # 1. Schedule
@@ -1289,63 +1369,41 @@ async def generate_weekly_card(
             )
         )
 
-
     logger.info(
         "%s Week %s schedule returned %s raw games",
         league_upper,
         week,
-        len(
-            games
-        ),
+        len(games),
     )
-
 
     if not games:
 
         return {
-            "league":
-                league_upper,
-
-            "week":
-                week,
-
-            "season":
-                season,
+            "league": league_upper,
+            "week": week,
+            "season": season,
 
             "generated_at":
                 datetime.utcnow().isoformat(),
 
-            "raw_schedule_games":
-                0,
+            "raw_schedule_games": 0,
+            "skipped_schedule_games": 0,
 
-            "skipped_schedule_games":
-                0,
+            "total_games": 0,
+            "games_with_lines": 0,
+            "games_with_movement": 0,
 
-            "total_games":
-                0,
-
-            "games_with_lines":
-                0,
-
-            "games_with_movement":
-                0,
-
-            "cfb_sp_model_games":
-                0,
-
-            "cfb_fallback_games":
-                0,
+            "cfb_sp_model_games": 0,
+            "cfb_fallback_games": 0,
 
             "snapshot_stats":
                 snapshotter.get_snapshot_stats(),
 
-            "games":
-                [],
+            "games": [],
 
             "error":
                 "No games found",
         }
-
 
     # ========================================================
     # 2. Vegas
@@ -1355,10 +1413,8 @@ async def generate_weekly_card(
 
         lines = (
             await get_lines(
-                league=
-                    league_upper,
-                week=
-                    week,
+                league=league_upper,
+                week=week,
             )
         )
 
@@ -1372,22 +1428,17 @@ async def generate_weekly_card(
 
         lines = []
 
-
     logger.info(
         "%s lines returned: %s",
         league_upper,
-        len(
-            lines
-        ),
+        len(lines),
     )
-
 
     lines_lookup = (
         build_lines_lookup(
             lines
         )
     )
-
 
     # ========================================================
     # 3. Fresh snapshot
@@ -1407,7 +1458,6 @@ async def generate_weekly_card(
             exc,
         )
 
-
     # ========================================================
     # 4. Build card
     # ========================================================
@@ -1419,7 +1469,6 @@ async def generate_weekly_card(
 
     cfb_sp_model_games = 0
     cfb_fallback_games = 0
-
 
     for game in games:
 
@@ -1470,7 +1519,6 @@ async def generate_weekly_card(
                 )
                 or ""
             )
-
 
         else:
 
@@ -1539,7 +1587,6 @@ async def generate_weekly_card(
                 or ""
             )
 
-
         if not home or not away:
 
             skipped_games += 1
@@ -1552,7 +1599,6 @@ async def generate_weekly_card(
 
             continue
 
-
         # ====================================================
         # 5. Features
         # ====================================================
@@ -1564,11 +1610,9 @@ async def generate_weekly_card(
                     home,
                     away,
                     nfl_team_stats,
-                    neutral_site=
-                        neutral,
+                    neutral_site=neutral,
                 )
             )
-
 
         else:
 
@@ -1577,11 +1621,9 @@ async def generate_weekly_card(
                     home,
                     away,
                     cfb_sp_lookup,
-                    neutral_site=
-                        neutral,
+                    neutral_site=neutral,
                 )
             )
-
 
         # ====================================================
         # 6. Adjustments
@@ -1597,13 +1639,11 @@ async def generate_weekly_card(
             league_upper,
         )
 
-
         # ====================================================
         # 7. Prediction
         # ====================================================
 
         fallback_diagnostics = None
-
 
         if league_upper == "NFL":
 
@@ -1620,7 +1660,6 @@ async def generate_weekly_card(
                 )
                 else "baseline"
             )
-
 
         else:
 
@@ -1641,7 +1680,6 @@ async def generate_weekly_card(
 
                 cfb_sp_model_games += 1
 
-
             else:
 
                 (
@@ -1651,10 +1689,8 @@ async def generate_weekly_card(
                     home,
                     away,
                     cfb_team_stats,
-                    neutral_site=
-                        neutral,
+                    neutral_site=neutral,
                 )
-
 
                 prediction = (
                     apply_fallback_margin_adjustments(
@@ -1663,13 +1699,11 @@ async def generate_weekly_card(
                     )
                 )
 
-
                 prediction_mode = (
                     "historical_fallback"
                 )
 
                 cfb_fallback_games += 1
-
 
         # ====================================================
         # 8. Vegas line
@@ -1683,7 +1717,6 @@ async def generate_weekly_card(
             )
         )
 
-
         if line is None:
 
             unmatched_lines += 1
@@ -1695,13 +1728,11 @@ async def generate_weekly_card(
                 home,
             )
 
-
         movement = (
             adj_summary[
                 "movement"
             ]
         )
-
 
         disparity = (
             calculate_disparity(
@@ -1711,6 +1742,17 @@ async def generate_weekly_card(
             )
         )
 
+        # ====================================================
+        # 8B. Confidence weighting
+        # ====================================================
+
+        disparity = (
+            apply_prediction_confidence(
+                disparity,
+                prediction_mode,
+                league_upper,
+            )
+        )
 
         # ====================================================
         # 9. Injury notes
@@ -1728,7 +1770,6 @@ async def generate_weekly_card(
             )
         )
 
-
         away_injury_notes = (
             _format_injury_notes(
                 adj_summary[
@@ -1741,13 +1782,11 @@ async def generate_weekly_card(
             )
         )
 
-
         # ====================================================
         # 10. Roster notes
         # ====================================================
 
         roster_notes = []
-
 
         if abs(
             adj_summary[
@@ -1769,7 +1808,6 @@ async def generate_weekly_card(
                 f"{adj_summary['home_roster_adj']:+.1f} pts"
             )
 
-
         if abs(
             adj_summary[
                 "away_roster_adj"
@@ -1790,13 +1828,11 @@ async def generate_weekly_card(
                 f"{adj_summary['away_roster_adj']:+.1f} pts"
             )
 
-
         # ====================================================
         # 11. Movement display
         # ====================================================
 
         mv_display = None
-
 
         if (
             movement.get(
@@ -1864,7 +1900,6 @@ async def generate_weekly_card(
                     ),
             }
 
-
         # ====================================================
         # 12. Add game
         # ====================================================
@@ -1890,6 +1925,12 @@ async def generate_weekly_card(
 
             "prediction_mode":
                 prediction_mode,
+
+            "confidence":
+                disparity.get(
+                    "confidence",
+                    "unrated",
+                ),
 
             "prediction":
                 prediction,
@@ -1941,6 +1982,9 @@ async def generate_weekly_card(
                 season,
         }
 
+        # ----------------------------------------------------
+        # Fallback diagnostics
+        # ----------------------------------------------------
 
         if fallback_diagnostics is not None:
 
@@ -1950,6 +1994,9 @@ async def generate_weekly_card(
                 fallback_diagnostics
             )
 
+        # ----------------------------------------------------
+        # Missing SP+ explanation
+        # ----------------------------------------------------
 
         if (
             league_upper == "CFB"
@@ -1980,27 +2027,41 @@ async def generate_weekly_card(
                     away
                 )
 
+            if missing_sp_teams:
 
-            card_game[
-                "model_note"
-            ] = (
-                "SP+ unavailable for "
-                +
-                ", ".join(
-                    missing_sp_teams
+                card_game[
+                    "model_note"
+                ] = (
+                    "SP+ unavailable for "
+                    +
+                    ", ".join(
+                        missing_sp_teams
+                    )
+                    +
+                    "; recent scoring fallback used. "
+                    "Edge confidence reduced."
                 )
-                +
-                "; recent scoring fallback used."
-            )
 
+            else:
+
+                card_game[
+                    "model_note"
+                ] = (
+                    "Incomplete SP+ data; "
+                    "recent scoring fallback used. "
+                    "Edge confidence reduced."
+                )
 
         card_games.append(
             card_game
         )
 
-
     # ========================================================
     # 13. Ranking
+    #
+    # IMPORTANT:
+    # Weekly Card now sorts by confidence-adjusted ranking_score,
+    # not raw edge_score.
     # ========================================================
 
     card_games.sort(
@@ -2009,13 +2070,12 @@ async def generate_weekly_card(
                 game[
                     "disparity"
                 ].get(
-                    "edge_score"
+                    "ranking_score"
                 )
                 or 0
             ),
         reverse=True,
     )
-
 
     # ========================================================
     # 14. Coverage
@@ -2031,7 +2091,6 @@ async def generate_weekly_card(
         ]
     )
 
-
     games_with_movement = sum(
         1
         for game in card_games
@@ -2041,6 +2100,21 @@ async def generate_weekly_card(
         is not None
     )
 
+    low_confidence_games = sum(
+        1
+        for game in card_games
+        if game.get(
+            "confidence"
+        ) == "low"
+    )
+
+    standard_confidence_games = sum(
+        1
+        for game in card_games
+        if game.get(
+            "confidence"
+        ) == "standard"
+    )
 
     logger.info(
         (
@@ -2052,24 +2126,23 @@ async def generate_weekly_card(
             "%s skipped, "
             "%s unmatched lines, "
             "%s SP+ model, "
-            "%s fallback"
+            "%s fallback, "
+            "%s standard confidence, "
+            "%s low confidence"
         ),
         league_upper,
         week,
-        len(
-            games
-        ),
-        len(
-            card_games
-        ),
+        len(games),
+        len(card_games),
         lines_coverage,
         games_with_movement,
         skipped_games,
         unmatched_lines,
         cfb_sp_model_games,
         cfb_fallback_games,
+        standard_confidence_games,
+        low_confidence_games,
     )
-
 
     # ========================================================
     # Final response
@@ -2089,9 +2162,7 @@ async def generate_weekly_card(
             datetime.utcnow().isoformat(),
 
         "raw_schedule_games":
-            len(
-                games
-            ),
+            len(games),
 
         "skipped_schedule_games":
             skipped_games,
@@ -2100,15 +2171,19 @@ async def generate_weekly_card(
             unmatched_lines,
 
         "total_games":
-            len(
-                card_games
-            ),
+            len(card_games),
 
         "games_with_lines":
             lines_coverage,
 
         "games_with_movement":
             games_with_movement,
+
+        "standard_confidence_games":
+            standard_confidence_games,
+
+        "low_confidence_games":
+            low_confidence_games,
 
         "cfb_sp_model_games":
             (
