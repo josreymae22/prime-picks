@@ -16,9 +16,19 @@ Production:
 - /predict and /card return 503 until initialization completes
 
 CFB prediction behavior:
-- If both teams have SP+ data, use trained CFB model
-- If either team is missing SP+ data, use a recent-performance fallback
-  rather than feeding artificial zero SP+ inputs into the trained model
+- Both teams have SP+ -> trained CFB model
+- Missing SP+ for either team -> opponent-adjusted historical fallback
+
+The fallback uses:
+- Recent scoring offense
+- Recent scoring defense
+- Recent scoring margin
+- Strength of schedule
+- Iterative SRS-style opponent-adjusted power rating
+- Home-field advantage
+
+This prevents FCS / weaker-schedule teams from being treated as equal
+to FBS teams merely because their raw scoring averages look similar.
 """
 
 import asyncio
@@ -109,6 +119,11 @@ def _cfb_value(
     snake: str,
     default=None,
 ):
+    """
+    Read either current CFBD camelCase fields or older
+    snake_case fields.
+    """
+
     value = data.get(camel)
 
     if value is None:
@@ -117,32 +132,88 @@ def _cfb_value(
     return default if value is None else value
 
 
+def _clip(
+    value: float,
+    minimum: float,
+    maximum: float,
+) -> float:
+    return max(
+        minimum,
+        min(
+            maximum,
+            value,
+        ),
+    )
+
+
+def _normal_cdf(
+    value: float,
+) -> float:
+    """
+    Standard normal CDF without requiring scipy here.
+    """
+
+    return (
+        0.5
+        *
+        (
+            1.0
+            +
+            math.erf(
+                value
+                /
+                math.sqrt(2.0)
+            )
+        )
+    )
+
+
 # ============================================================
-# CFB historical fallback profiles
+# CFB opponent-adjusted fallback profiles
 # ============================================================
 
 def build_cfb_recent_team_stats(
     games: list[dict],
-    window: int = 8,
+    window: int = 12,
+    srs_iterations: int = 30,
 ) -> dict:
     """
-    Build recent scoring profiles for CFB teams.
+    Build opponent-adjusted CFB fallback team profiles.
 
-    Used only when the normal SP+ model cannot safely be used.
+    This replaces the older raw-scoring-only fallback.
 
-    Each profile tracks:
-    - recent points scored
-    - recent points allowed
-    - recent margin
-    - sample count
+    For every team we retain recent:
+    - Points scored
+    - Points allowed
+    - Scoring margin
+    - Opponents
 
-    The newest games across the historical training period
-    are used, so 2025 games naturally take priority over older seasons.
+    Then calculate an iterative SRS-style rating:
+
+        team rating
+        =
+        average (
+            game scoring margin
+            +
+            opponent rating
+        )
+
+    The ratings are re-centered around zero each iteration.
+
+    Why this matters:
+    A team averaging 30 PPG against weak opposition should not
+    automatically be considered equivalent to a team averaging
+    30 PPG against SEC / Big Ten / Big 12 competition.
+
+    Large individual-game margins are capped during SRS
+    calculation to reduce the effect of extreme blowouts.
     """
 
-    team_history: dict[str, list[dict]] = {}
-
     sortable_games = []
+
+    # --------------------------------------------------------
+    # Normalize historical games
+    # --------------------------------------------------------
 
     for game in games:
 
@@ -190,8 +261,10 @@ def build_cfb_recent_team_stats(
         sortable_games.append({
             "home_team": home_team,
             "away_team": away_team,
+
             "home_points": home_points,
             "away_points": away_points,
+
             "season": int(
                 _cfb_value(
                     game,
@@ -201,6 +274,7 @@ def build_cfb_recent_team_stats(
                 )
                 or 0
             ),
+
             "week": int(
                 _cfb_value(
                     game,
@@ -210,6 +284,7 @@ def build_cfb_recent_team_stats(
                 )
                 or 0
             ),
+
             "date": (
                 _cfb_value(
                     game,
@@ -221,15 +296,19 @@ def build_cfb_recent_team_stats(
             ),
         })
 
-
     sortable_games.sort(
-        key=lambda g: (
-            g["season"],
-            g["week"],
-            g["date"],
+        key=lambda game: (
+            game["season"],
+            game["week"],
+            game["date"],
         )
     )
 
+    # --------------------------------------------------------
+    # Team histories
+    # --------------------------------------------------------
+
+    team_history: dict[str, list[dict]] = {}
 
     for game in sortable_games:
 
@@ -239,95 +318,307 @@ def build_cfb_recent_team_stats(
         home_points = game["home_points"]
         away_points = game["away_points"]
 
+        home_margin = (
+            home_points
+            -
+            away_points
+        )
+
+        away_margin = (
+            away_points
+            -
+            home_points
+        )
+
         team_history.setdefault(
             home_team,
             [],
         ).append({
+            "opponent": away_team,
             "pts_for": home_points,
             "pts_against": away_points,
+            "margin": home_margin,
         })
 
         team_history.setdefault(
             away_team,
             [],
         ).append({
+            "opponent": home_team,
             "pts_for": away_points,
             "pts_against": home_points,
+            "margin": away_margin,
         })
 
+    # --------------------------------------------------------
+    # Restrict each team to recent history
+    # --------------------------------------------------------
+
+    recent_history = {
+        team: history[-window:]
+        for team, history
+        in team_history.items()
+        if history
+    }
+
+    # --------------------------------------------------------
+    # Initial ratings = recent average margin
+    # --------------------------------------------------------
+
+    ratings = {}
+
+    for team, history in recent_history.items():
+
+        margins = [
+            _clip(
+                float(game["margin"]),
+                -35.0,
+                35.0,
+            )
+            for game in history
+        ]
+
+        ratings[team] = (
+            float(
+                np.mean(margins)
+            )
+            if margins
+            else 0.0
+        )
+
+    # --------------------------------------------------------
+    # Iterative Simple Rating System
+    # --------------------------------------------------------
+
+    for _ in range(
+        srs_iterations
+    ):
+
+        new_ratings = {}
+
+        for team, history in recent_history.items():
+
+            game_values = []
+
+            for game in history:
+
+                opponent = (
+                    game[
+                        "opponent"
+                    ]
+                )
+
+                margin = _clip(
+                    float(
+                        game[
+                            "margin"
+                        ]
+                    ),
+                    -35.0,
+                    35.0,
+                )
+
+                opponent_rating = (
+                    ratings.get(
+                        opponent,
+                        0.0,
+                    )
+                )
+
+                game_values.append(
+                    margin
+                    +
+                    opponent_rating
+                )
+
+            if game_values:
+
+                new_ratings[
+                    team
+                ] = float(
+                    np.mean(
+                        game_values
+                    )
+                )
+
+            else:
+
+                new_ratings[
+                    team
+                ] = 0.0
+
+        # Center ratings around zero.
+        if new_ratings:
+
+            center = float(
+                np.mean(
+                    list(
+                        new_ratings.values()
+                    )
+                )
+            )
+
+            for team in new_ratings:
+
+                new_ratings[
+                    team
+                ] -= center
+
+        # Damp movement slightly for stability.
+        for team in new_ratings:
+
+            previous = ratings.get(
+                team,
+                0.0,
+            )
+
+            new_ratings[
+                team
+            ] = (
+                0.75
+                *
+                new_ratings[
+                    team
+                ]
+                +
+                0.25
+                *
+                previous
+            )
+
+        ratings = new_ratings
+
+    # --------------------------------------------------------
+    # Build final profiles
+    # --------------------------------------------------------
 
     profiles = {}
 
-    for team, history in team_history.items():
-
-        recent = history[-window:]
-
-        if not recent:
-            continue
+    for team, history in recent_history.items():
 
         pts_for = [
-            item["pts_for"]
-            for item in recent
+            float(
+                game[
+                    "pts_for"
+                ]
+            )
+            for game in history
         ]
 
         pts_against = [
-            item["pts_against"]
-            for item in recent
+            float(
+                game[
+                    "pts_against"
+                ]
+            )
+            for game in history
         ]
 
         margins = [
-            item["pts_for"] - item["pts_against"]
-            for item in recent
+            float(
+                game[
+                    "margin"
+                ]
+            )
+            for game in history
         ]
 
-        profiles[team] = {
+        opponent_ratings = [
+            ratings.get(
+                game[
+                    "opponent"
+                ],
+                0.0,
+            )
+            for game in history
+        ]
+
+        avg_pts_for = float(
+            np.mean(
+                pts_for
+            )
+        )
+
+        avg_pts_against = float(
+            np.mean(
+                pts_against
+            )
+        )
+
+        avg_margin = float(
+            np.mean(
+                margins
+            )
+        )
+
+        schedule_strength = (
+            float(
+                np.mean(
+                    opponent_ratings
+                )
+            )
+            if opponent_ratings
+            else 0.0
+        )
+
+        power_rating = float(
+            ratings.get(
+                team,
+                0.0,
+            )
+        )
+
+        profiles[
+            team
+        ] = {
             "avg_pts_for":
                 round(
-                    float(np.mean(pts_for)),
+                    avg_pts_for,
                     2,
                 ),
 
             "avg_pts_against":
                 round(
-                    float(np.mean(pts_against)),
+                    avg_pts_against,
                     2,
                 ),
 
             "avg_margin":
                 round(
-                    float(np.mean(margins)),
+                    avg_margin,
+                    2,
+                ),
+
+            "schedule_strength":
+                round(
+                    schedule_strength,
+                    2,
+                ),
+
+            "power_rating":
+                round(
+                    power_rating,
+                    2,
+                ),
+
+            "srs_rating":
+                round(
+                    power_rating,
                     2,
                 ),
 
             "games":
-                len(recent),
+                len(
+                    history
+                ),
         }
-
 
     return profiles
 
 
-def _normal_cdf(
-    value: float,
-) -> float:
-    """
-    Standard normal CDF without requiring scipy here.
-    """
-
-    return (
-        0.5
-        *
-        (
-            1.0
-            +
-            math.erf(
-                value
-                /
-                math.sqrt(2.0)
-            )
-        )
-    )
-
+# ============================================================
+# CFB opponent-adjusted fallback prediction
+# ============================================================
 
 def predict_cfb_fallback(
     home_team: str,
@@ -336,22 +627,34 @@ def predict_cfb_fallback(
     neutral_site: bool = False,
 ) -> tuple[dict, dict]:
     """
-    CFB fallback prediction for matchups lacking complete SP+ data.
+    Opponent-adjusted CFB fallback.
 
-    Uses recent team scoring offense/defense instead of artificial
-    SP+ defaults.
+    Used only when one or both teams do not have valid SP+ data.
 
-    This is intentionally conservative and is not passed through
-    the SP+-trained model.
+    Combines:
+
+    1. Raw scoring projection
+       team's offense vs opponent defense
+
+    2. Opponent-adjusted SRS power difference
+
+    3. Home-field advantage
+
+    SRS receives more weight than raw scoring because raw scoring
+    can be highly misleading across different levels of competition.
     """
 
     default_profile = {
         "avg_pts_for": 27.0,
         "avg_pts_against": 27.0,
         "avg_margin": 0.0,
+
+        "schedule_strength": 0.0,
+        "power_rating": 0.0,
+        "srs_rating": 0.0,
+
         "games": 0,
     }
-
 
     home = team_stats.get(
         home_team,
@@ -363,117 +666,190 @@ def predict_cfb_fallback(
         default_profile,
     )
 
-
     hfa = (
         0.0
         if neutral_site
         else 3.0
     )
 
+    # --------------------------------------------------------
+    # Raw scoring projection
+    # --------------------------------------------------------
+
+    raw_home_score = (
+        (
+            home[
+                "avg_pts_for"
+            ]
+            +
+            away[
+                "avg_pts_against"
+            ]
+        )
+        /
+        2.0
+    )
+
+    raw_away_score = (
+        (
+            away[
+                "avg_pts_for"
+            ]
+            +
+            home[
+                "avg_pts_against"
+            ]
+        )
+        /
+        2.0
+    )
+
+    raw_total = (
+        raw_home_score
+        +
+        raw_away_score
+    )
+
+    raw_scoring_margin = (
+        raw_home_score
+        -
+        raw_away_score
+    )
 
     # --------------------------------------------------------
-    # Base expected scoring
+    # Opponent-adjusted strength
+    # --------------------------------------------------------
+
+    home_power = float(
+        home.get(
+            "power_rating",
+            0.0,
+        )
+        or 0.0
+    )
+
+    away_power = float(
+        away.get(
+            "power_rating",
+            0.0,
+        )
+        or 0.0
+    )
+
+    power_edge = (
+        home_power
+        -
+        away_power
+    )
+
+    # SRS difference approximates expected neutral-field margin.
+    power_margin = (
+        power_edge
+        +
+        hfa
+    )
+
+    # --------------------------------------------------------
+    # Blend raw scoring and SRS
     #
-    # Blend team's offense with opponent's defense.
-    # HFA is split across the two expected scores so the final
-    # margin receives the full +3 point adjustment.
+    # Opponent-adjusted rating receives most of the margin weight.
+    # --------------------------------------------------------
+
+    predicted_margin = (
+        0.25
+        *
+        (
+            raw_scoring_margin
+            +
+            hfa
+        )
+        +
+        0.75
+        *
+        power_margin
+    )
+
+    # --------------------------------------------------------
+    # Total
+    #
+    # Raw scoring information is still useful for totals.
+    # --------------------------------------------------------
+
+    predicted_total = _clip(
+        raw_total,
+        34.0,
+        85.0,
+    )
+
+    # Avoid absurd margins.
+    predicted_margin = _clip(
+        predicted_margin,
+        -45.0,
+        45.0,
+    )
+
+    # A margin cannot realistically exceed almost the entire total.
+    max_margin_from_total = max(
+        10.0,
+        predicted_total
+        -
+        10.0,
+    )
+
+    predicted_margin = _clip(
+        predicted_margin,
+        -max_margin_from_total,
+        max_margin_from_total,
+    )
+
+    # --------------------------------------------------------
+    # Convert margin + total to team scores
     # --------------------------------------------------------
 
     home_score = (
-        (
-            home["avg_pts_for"]
-            +
-            away["avg_pts_against"]
-        )
-        / 2.0
+        predicted_total
         +
-        hfa / 2.0
-    )
-
+        predicted_margin
+    ) / 2.0
 
     away_score = (
-        (
-            away["avg_pts_for"]
-            +
-            home["avg_pts_against"]
-        )
-        / 2.0
+        predicted_total
         -
-        hfa / 2.0
-    )
-
-
-    # --------------------------------------------------------
-    # Light recent-form adjustment
-    #
-    # Keep this deliberately restrained so one hot/cold stretch
-    # cannot dominate the fallback.
-    # --------------------------------------------------------
-
-    form_edge = (
-        home["avg_margin"]
-        -
-        away["avg_margin"]
-    )
-
-    form_adjustment = max(
-        -6.0,
-        min(
-            6.0,
-            form_edge * 0.20,
-        ),
-    )
-
-
-    home_score += (
-        form_adjustment / 2.0
-    )
-
-    away_score -= (
-        form_adjustment / 2.0
-    )
-
-
-    # --------------------------------------------------------
-    # Keep output in plausible football territory.
-    # --------------------------------------------------------
+        predicted_margin
+    ) / 2.0
 
     home_score = max(
-        7.0,
-        min(
-            60.0,
-            home_score,
-        ),
+        3.0,
+        home_score,
     )
 
     away_score = max(
-        7.0,
-        min(
-            60.0,
-            away_score,
-        ),
+        3.0,
+        away_score,
     )
 
-
-    margin = (
-        home_score
-        -
-        away_score
-    )
-
-    total = (
+    # Recalculate after score floor.
+    predicted_total = (
         home_score
         +
         away_score
     )
 
+    predicted_margin = (
+        home_score
+        -
+        away_score
+    )
 
-    margin_rmse = 14.0
-    total_rmse = 18.0
+    # --------------------------------------------------------
+    # Wider uncertainty than trained SP+ model
+    # --------------------------------------------------------
 
+    margin_rmse = 16.0
+    total_rmse = 19.0
 
     margin_lo = (
-        margin
+        predicted_margin
         -
         1.28
         *
@@ -481,7 +857,7 @@ def predict_cfb_fallback(
     )
 
     margin_hi = (
-        margin
+        predicted_margin
         +
         1.28
         *
@@ -489,7 +865,7 @@ def predict_cfb_fallback(
     )
 
     total_lo = (
-        total
+        predicted_total
         -
         1.28
         *
@@ -497,20 +873,18 @@ def predict_cfb_fallback(
     )
 
     total_hi = (
-        total
+        predicted_total
         +
         1.28
         *
         total_rmse
     )
 
-
     home_win_prob = _normal_cdf(
-        margin
+        predicted_margin
         /
         margin_rmse
     )
-
 
     prediction = {
         "predicted_home_score":
@@ -527,13 +901,13 @@ def predict_cfb_fallback(
 
         "predicted_margin":
             round(
-                margin,
+                predicted_margin,
                 1,
             ),
 
         "predicted_total":
             round(
-                total,
+                predicted_total,
                 1,
             ),
 
@@ -563,18 +937,18 @@ def predict_cfb_fallback(
 
         "home_win_prob":
             round(
-                float(home_win_prob),
+                float(
+                    home_win_prob
+                ),
                 3,
             ),
 
-        # Frontend already understands this flag.
         "model_trained":
             False,
 
         "prediction_mode":
-            "historical_fallback",
+            "opponent_adjusted_fallback",
     }
-
 
     diagnostics = {
         "home_recent_profile":
@@ -586,25 +960,83 @@ def predict_cfb_fallback(
         "home_field_advantage":
             hfa,
 
-        "recent_form_edge":
+        "home_power_rating":
             round(
-                form_edge,
+                home_power,
                 2,
             ),
 
-        "recent_form_adjustment":
+        "away_power_rating":
             round(
-                form_adjustment,
+                away_power,
+                2,
+            ),
+
+        "power_rating_edge":
+            round(
+                power_edge,
+                2,
+            ),
+
+        "power_margin":
+            round(
+                power_margin,
+                2,
+            ),
+
+        "raw_scoring_margin":
+            round(
+                raw_scoring_margin,
+                2,
+            ),
+
+        "raw_projected_total":
+            round(
+                raw_total,
+                2,
+            ),
+
+        "home_schedule_strength":
+            round(
+                float(
+                    home.get(
+                        "schedule_strength",
+                        0.0,
+                    )
+                    or 0.0
+                ),
+                2,
+            ),
+
+        "away_schedule_strength":
+            round(
+                float(
+                    away.get(
+                        "schedule_strength",
+                        0.0,
+                    )
+                    or 0.0
+                ),
                 2,
             ),
 
         "home_history_available":
-            home["games"] > 0,
+            home.get(
+                "games",
+                0,
+            )
+            > 0,
 
         "away_history_available":
-            away["games"] > 0,
-    }
+            away.get(
+                "games",
+                0,
+            )
+            > 0,
 
+        "fallback_method":
+            "opponent_adjusted_srs",
+    }
 
     return (
         prediction,
@@ -650,12 +1082,15 @@ async def build_current_cfb_sp_lookup(
             )
         )
 
-        # build_cfb_sp_lookup contains the internal
-        # __normalized__ helper key, so check actual team records.
         actual_team_count = len([
             key
-            for key in lookup.keys()
-            if not str(key).startswith("__")
+            for key
+            in lookup.keys()
+            if not str(
+                key
+            ).startswith(
+                "__"
+            )
         ])
 
         if actual_team_count > 0:
@@ -668,7 +1103,6 @@ async def build_current_cfb_sp_lookup(
 
             return lookup
 
-
     except Exception as exc:
 
         logger.warning(
@@ -677,11 +1111,12 @@ async def build_current_cfb_sp_lookup(
             exc,
         )
 
-
     if training_seasons:
 
         fallback_season = (
-            training_seasons[-1]
+            training_seasons[
+                -1
+            ]
         )
 
         logger.info(
@@ -705,8 +1140,13 @@ async def build_current_cfb_sp_lookup(
 
             actual_team_count = len([
                 key
-                for key in lookup.keys()
-                if not str(key).startswith("__")
+                for key
+                in lookup.keys()
+                if not str(
+                    key
+                ).startswith(
+                    "__"
+                )
             ])
 
             logger.info(
@@ -717,7 +1157,6 @@ async def build_current_cfb_sp_lookup(
 
             return lookup
 
-
         except Exception as exc:
 
             logger.warning(
@@ -725,7 +1164,6 @@ async def build_current_cfb_sp_lookup(
                 fallback_season,
                 exc,
             )
-
 
     return {}
 
@@ -738,14 +1176,20 @@ async def initialize_prime_picks():
     """
     Heavy startup work.
 
-    Runs as a background asyncio task AFTER FastAPI has
-    been allowed to bind to Render's HTTP port.
+    Runs in the background AFTER FastAPI binds to Render's port.
     """
 
-    app_state["initializing"] = True
-    app_state["ready"] = False
-    app_state["startup_error"] = None
+    app_state[
+        "initializing"
+    ] = True
 
+    app_state[
+        "ready"
+    ] = False
+
+    app_state[
+        "startup_error"
+    ] = None
 
     nfl_seasons = (
         nfl_training_seasons()
@@ -755,7 +1199,6 @@ async def initialize_prime_picks():
         cfb_training_seasons()
     )
 
-
     app_state[
         "nfl_training_seasons"
     ] = nfl_seasons
@@ -763,7 +1206,6 @@ async def initialize_prime_picks():
     app_state[
         "cfb_training_seasons"
     ] = cfb_seasons
-
 
     logger.info(
         "🏈 Prime Picks background initialization starting"
@@ -779,7 +1221,6 @@ async def initialize_prime_picks():
         cfb_seasons,
     )
 
-
     try:
 
         # ====================================================
@@ -790,7 +1231,9 @@ async def initialize_prime_picks():
             "Fetching NFL teams..."
         )
 
-        app_state["nfl_teams"] = (
+        app_state[
+            "nfl_teams"
+        ] = (
             await get_nfl_teams()
         )
 
@@ -803,7 +1246,6 @@ async def initialize_prime_picks():
             ),
         )
 
-
         # ====================================================
         # NFL HISTORICAL DATA
         # ====================================================
@@ -815,25 +1257,29 @@ async def initialize_prime_picks():
 
         nfl_games = (
             await get_nfl_historical_games(
-                seasons=nfl_seasons
+                seasons=
+                    nfl_seasons
             )
         )
 
         logger.info(
             "NFL historical games loaded: %s",
-            len(nfl_games),
+            len(
+                nfl_games
+            ),
         )
 
-
         # ====================================================
-        # NFL CURRENT TEAM FORM
+        # NFL TEAM FORM
         # ====================================================
 
         app_state[
             "nfl_team_stats"
-        ] = build_nfl_team_rolling(
-            nfl_games,
-            window=8,
+        ] = (
+            build_nfl_team_rolling(
+                nfl_games,
+                window=8,
+            )
         )
 
         logger.info(
@@ -845,12 +1291,13 @@ async def initialize_prime_picks():
             ),
         )
 
-
         # ====================================================
         # NFL TRAINING
         # ====================================================
 
-        if len(nfl_games) > 20:
+        if len(
+            nfl_games
+        ) > 20:
 
             logger.info(
                 "Building chronological NFL training features..."
@@ -865,7 +1312,9 @@ async def initialize_prime_picks():
 
             logger.info(
                 "NFL training rows generated: %s",
-                len(nfl_train_df),
+                len(
+                    nfl_train_df
+                ),
             )
 
             nfl_result = (
@@ -895,7 +1344,6 @@ async def initialize_prime_picks():
                 "NFL historical dataset too small to train."
             )
 
-
         # ====================================================
         # CFB HISTORICAL DATA
         # ====================================================
@@ -907,33 +1355,38 @@ async def initialize_prime_picks():
 
         cfb_games = (
             await get_cfb_historical_games(
-                seasons=cfb_seasons
+                seasons=
+                    cfb_seasons
             )
         )
 
         logger.info(
             "CFB historical games loaded: %s",
-            len(cfb_games),
+            len(
+                cfb_games
+            ),
         )
 
-
         # ====================================================
-        # CFB FALLBACK TEAM PROFILES
+        # CFB OPPONENT-ADJUSTED FALLBACK PROFILES
         # ====================================================
 
         logger.info(
-            "Building CFB recent team scoring profiles..."
+            "Building opponent-adjusted CFB fallback profiles..."
         )
 
         app_state[
             "cfb_team_stats"
-        ] = build_cfb_recent_team_stats(
-            cfb_games,
-            window=8,
+        ] = (
+            build_cfb_recent_team_stats(
+                cfb_games,
+                window=12,
+                srs_iterations=30,
+            )
         )
 
         logger.info(
-            "CFB recent team profiles loaded: %s",
+            "CFB opponent-adjusted profiles loaded: %s",
             len(
                 app_state[
                     "cfb_team_stats"
@@ -941,14 +1394,63 @@ async def initialize_prime_picks():
             ),
         )
 
+        # Diagnostic extremes
+        if app_state[
+            "cfb_team_stats"
+        ]:
+
+            sorted_power = sorted(
+                app_state[
+                    "cfb_team_stats"
+                ].items(),
+                key=lambda item:
+                    item[
+                        1
+                    ].get(
+                        "power_rating",
+                        0,
+                    ),
+                reverse=True,
+            )
+
+            logger.info(
+                "CFB highest fallback power ratings: %s",
+                [
+                    (
+                        team,
+                        profile.get(
+                            "power_rating"
+                        ),
+                    )
+                    for team, profile
+                    in sorted_power[
+                        :5
+                    ]
+                ],
+            )
+
+            logger.info(
+                "CFB lowest fallback power ratings: %s",
+                [
+                    (
+                        team,
+                        profile.get(
+                            "power_rating"
+                        ),
+                    )
+                    for team, profile
+                    in sorted_power[
+                        -5:
+                    ]
+                ],
+            )
 
         # ====================================================
-        # CFB SEASON-SPECIFIC TRAINING
+        # CFB SEASON-SPECIFIC SP+ TRAINING
         # ====================================================
 
         cfb_training_frames = []
         cfb_training_diagnostics = {}
-
 
         for season in cfb_seasons:
 
@@ -959,10 +1461,12 @@ async def initialize_prime_picks():
 
             season_games = [
                 game
-                for game in cfb_games
+                for game
+                in cfb_games
                 if game.get(
                     "season"
-                ) == season
+                )
+                == season
             ]
 
             logger.info(
@@ -972,7 +1476,6 @@ async def initialize_prime_picks():
                     season_games
                 ),
             )
-
 
             try:
 
@@ -1005,14 +1508,12 @@ async def initialize_prime_picks():
                     actual_sp_teams,
                 )
 
-
                 season_df = (
                     build_cfb_training_data(
                         season_games,
                         season_sp_lookup,
                     )
                 )
-
 
                 cfb_training_diagnostics[
                     season
@@ -1061,7 +1562,6 @@ async def initialize_prime_picks():
                         ),
                 }
 
-
                 logger.info(
                     (
                         "CFB %s training rows: %s "
@@ -1077,13 +1577,11 @@ async def initialize_prime_picks():
                     ),
                 )
 
-
                 if not season_df.empty:
 
                     cfb_training_frames.append(
                         season_df
                     )
-
 
             except Exception as exc:
 
@@ -1093,9 +1591,8 @@ async def initialize_prime_picks():
                     exc,
                 )
 
-
         # ====================================================
-        # COMBINE CFB TRAINING DATA
+        # COMBINE CFB TRAINING
         # ====================================================
 
         if cfb_training_frames:
@@ -1113,14 +1610,12 @@ async def initialize_prime_picks():
                 pd.DataFrame()
             )
 
-
         logger.info(
             "CFB total model training rows: %s",
             len(
                 cfb_train_df
             ),
         )
-
 
         # ====================================================
         # TRAIN CFB MODEL
@@ -1138,8 +1633,9 @@ async def initialize_prime_picks():
 
         cfb_result[
             "season_diagnostics"
-        ] = cfb_training_diagnostics
-
+        ] = (
+            cfb_training_diagnostics
+        )
 
         app_state[
             "training_results"
@@ -1147,12 +1643,10 @@ async def initialize_prime_picks():
             "cfb"
         ] = cfb_result
 
-
         logger.info(
             "CFB trained: %s",
             cfb_result,
         )
-
 
         # ====================================================
         # CURRENT CFB SP+
@@ -1165,7 +1659,6 @@ async def initialize_prime_picks():
                 cfb_seasons
             )
         )
-
 
         # ====================================================
         # NFL INJURIES
@@ -1189,7 +1682,9 @@ async def initialize_prime_picks():
             logger.info(
                 "Injuries loaded: %s players",
                 sum(
-                    len(players)
+                    len(
+                        players
+                    )
                     for players
                     in nfl_injuries.values()
                 ),
@@ -1201,7 +1696,6 @@ async def initialize_prime_picks():
                 "Injury fetch failed (non-fatal): %s",
                 exc,
             )
-
 
         # ====================================================
         # INITIAL LINE SNAPSHOT
@@ -1221,7 +1715,6 @@ async def initialize_prime_picks():
                 "Initial snapshot failed (non-fatal): %s",
                 exc,
             )
-
 
         # ====================================================
         # START SNAPSHOT SCHEDULER
@@ -1259,7 +1752,6 @@ async def initialize_prime_picks():
                 exc,
             )
 
-
         # ====================================================
         # READY
         # ====================================================
@@ -1271,7 +1763,6 @@ async def initialize_prime_picks():
         app_state[
             "startup_error"
         ] = None
-
 
         logger.info(
             "✅ Prime Picks ready"
@@ -1318,14 +1809,13 @@ async def initialize_prime_picks():
         )
 
         logger.info(
-            "CFB fallback team profiles: %s",
+            "CFB opponent-adjusted fallback profiles: %s",
             len(
                 app_state[
                     "cfb_team_stats"
                 ]
             ),
         )
-
 
     except asyncio.CancelledError:
 
@@ -1334,7 +1824,6 @@ async def initialize_prime_picks():
         )
 
         raise
-
 
     except Exception as exc:
 
@@ -1353,7 +1842,6 @@ async def initialize_prime_picks():
         ] = str(
             exc
         )
-
 
     finally:
 
@@ -1383,7 +1871,6 @@ async def lifespan(
         "initializing"
     ] = True
 
-
     initialization_task = (
         asyncio.create_task(
             initialize_prime_picks()
@@ -1394,15 +1881,12 @@ async def lifespan(
         "initialization_task"
     ] = initialization_task
 
-
-    # Yield immediately so Render can detect the HTTP port.
+    # Let Render see the port immediately.
     yield
-
 
     logger.info(
         "Prime Picks shutting down."
     )
-
 
     try:
 
@@ -1415,13 +1899,11 @@ async def lifespan(
             exc,
         )
 
-
     snapshot_task = (
         app_state.get(
             "snapshot_task"
         )
     )
-
 
     if snapshot_task:
 
@@ -1441,7 +1923,6 @@ async def lifespan(
                 "Snapshot scheduler shutdown error: %s",
                 exc,
             )
-
 
     if (
         initialization_task
@@ -1473,10 +1954,9 @@ async def lifespan(
 
 app = FastAPI(
     title="Prime Picks API",
-    version="1.3.0",
+    version="1.4.0",
     lifespan=lifespan,
 )
-
 
 app.add_middleware(
     CORSMiddleware,
@@ -1580,6 +2060,17 @@ def status():
         )
     ])
 
+    power_values = [
+        profile.get(
+            "power_rating",
+            0.0,
+        )
+        for profile
+        in app_state[
+            "cfb_team_stats"
+        ].values()
+    ]
+
     return {
         "ready":
             app_state[
@@ -1630,6 +2121,33 @@ def status():
                     "cfb_team_stats"
                 ]
             ),
+
+        "cfb_fallback_method":
+            "opponent_adjusted_srs",
+
+        "cfb_power_rating_min":
+            (
+                round(
+                    min(
+                        power_values
+                    ),
+                    2,
+                )
+                if power_values
+                else None
+            ),
+
+        "cfb_power_rating_max":
+            (
+                round(
+                    max(
+                        power_values
+                    ),
+                    2,
+                )
+                if power_values
+                else None
+            ),
     }
 
 
@@ -1669,7 +2187,6 @@ async def cfb_teams():
                 ),
             )
 
-
     return app_state[
         "cfb_teams"
     ]
@@ -1696,11 +2213,9 @@ def predict(
             ),
         )
 
-
     league = (
         req.league.upper()
     )
-
 
     if league == "NFL":
 
@@ -1745,6 +2260,7 @@ def predict(
             else "baseline"
         )
 
+        fallback_diagnostics = None
 
     elif league == "CFB":
 
@@ -1766,10 +2282,9 @@ def predict(
             )
         )
 
-
-        # ====================================================
-        # Complete SP+ coverage -> trained model
-        # ====================================================
+        # ----------------------------------------------------
+        # Both teams have SP+
+        # ----------------------------------------------------
 
         if features.get(
             "sp_data_complete",
@@ -1788,32 +2303,32 @@ def predict(
 
             fallback_diagnostics = None
 
-
-        # ====================================================
-        # Missing SP+ -> historical fallback
-        # ====================================================
+        # ----------------------------------------------------
+        # Missing SP+ -> opponent-adjusted SRS fallback
+        # ----------------------------------------------------
 
         else:
 
             (
                 prediction,
                 fallback_diagnostics,
-            ) = predict_cfb_fallback(
-                req.home_team,
-                req.away_team,
-                app_state[
-                    "cfb_team_stats"
-                ],
-                neutral_site=
-                    bool(
-                        req.neutral_site
-                    ),
+            ) = (
+                predict_cfb_fallback(
+                    req.home_team,
+                    req.away_team,
+                    app_state[
+                        "cfb_team_stats"
+                    ],
+                    neutral_site=
+                        bool(
+                            req.neutral_site
+                        ),
+                )
             )
 
             prediction_mode = (
-                "historical_fallback"
+                "opponent_adjusted_fallback"
             )
-
 
         key_factors = (
             _cfb_key_factors(
@@ -1826,7 +2341,6 @@ def predict(
             )
         )
 
-
     else:
 
         raise HTTPException(
@@ -1835,7 +2349,6 @@ def predict(
                 "League must be NFL or CFB"
             ),
         )
-
 
     response = {
         "home_team":
@@ -1872,13 +2385,11 @@ def predict(
             ),
     }
 
-
     if (
         league == "CFB"
         and
-        prediction_mode
-        ==
-        "historical_fallback"
+        fallback_diagnostics
+        is not None
     ):
 
         response[
@@ -1886,7 +2397,6 @@ def predict(
         ] = (
             fallback_diagnostics
         )
-
 
     return response
 
@@ -1958,10 +2468,11 @@ def _nfl_key_factors(
 
     factors = []
 
-
-    off_delta = features.get(
-        "off_delta",
-        0,
+    off_delta = (
+        features.get(
+            "off_delta",
+            0,
+        )
     )
 
     if abs(
@@ -1982,7 +2493,7 @@ def _nfl_key_factors(
                 (
                     f"{leader} averages "
                     f"{abs(off_delta):.1f} "
-                    f"more pts/game recently"
+                    "more pts/game recently"
                 ),
 
             "impact":
@@ -1995,10 +2506,11 @@ def _nfl_key_factors(
                 ),
         })
 
-
-    def_delta = features.get(
-        "def_delta",
-        0,
+    def_delta = (
+        features.get(
+            "def_delta",
+            0,
+        )
     )
 
     if abs(
@@ -2018,7 +2530,7 @@ def _nfl_key_factors(
             "detail":
                 (
                     f"{leader} allowing "
-                    f"fewer points on average"
+                    "fewer points on average"
                 ),
 
             "impact":
@@ -2030,7 +2542,6 @@ def _nfl_key_factors(
                     else "medium"
                 ),
         })
-
 
     if not features.get(
         "neutral_site",
@@ -2044,13 +2555,12 @@ def _nfl_key_factors(
             "detail":
                 (
                     f"{home} gets "
-                    f"+2.5 pt HFA adjustment"
+                    "+2.5 pt HFA adjustment"
                 ),
 
             "impact":
                 "low",
         })
-
 
     margin_diff = (
         features.get(
@@ -2063,7 +2573,6 @@ def _nfl_key_factors(
             0,
         )
     )
-
 
     if abs(
         margin_diff
@@ -2082,14 +2591,13 @@ def _nfl_key_factors(
             "detail":
                 (
                     f"{leader} has "
-                    f"significantly better "
-                    f"recent win margins"
+                    "significantly better "
+                    "recent win margins"
                 ),
 
             "impact":
                 "high",
         })
-
 
     return factors
 
@@ -2103,7 +2611,6 @@ def _cfb_key_factors(
 ) -> list[dict]:
 
     factors = []
-
 
     sp_data_complete = (
         features.get(
@@ -2126,10 +2633,9 @@ def _cfb_key_factors(
         )
     )
 
-
-    # ========================================================
-    # Missing SP+ warning
-    # ========================================================
+    # --------------------------------------------------------
+    # Missing SP+
+    # --------------------------------------------------------
 
     if not sp_data_complete:
 
@@ -2145,7 +2651,6 @@ def _cfb_key_factors(
                 away
             )
 
-
         if missing:
 
             factors.append({
@@ -2156,18 +2661,17 @@ def _cfb_key_factors(
                     (
                         "No current SP+ rating is available for "
                         f"{', '.join(missing)}. "
-                        "Prime Picks used recent scoring performance "
-                        "instead of manufacturing an SP+ rating."
+                        "Prime Picks used opponent-adjusted "
+                        "historical ratings instead."
                     ),
 
                 "impact":
                     "low",
             })
 
-
-    # ========================================================
-    # Normal SP+ factors
-    # ========================================================
+    # --------------------------------------------------------
+    # Normal SP+
+    # --------------------------------------------------------
 
     if sp_data_complete:
 
@@ -2177,7 +2681,6 @@ def _cfb_key_factors(
                 0,
             )
         )
-
 
         if abs(
             sp_diff
@@ -2210,7 +2713,6 @@ def _cfb_key_factors(
                     ),
             })
 
-
         off_adv = (
             features.get(
                 "off_def_matchup_home",
@@ -2222,7 +2724,6 @@ def _cfb_key_factors(
                 0,
             )
         )
-
 
         if abs(
             off_adv
@@ -2249,12 +2750,110 @@ def _cfb_key_factors(
                     "medium",
             })
 
-
-    # ========================================================
-    # Fallback recent-form factors
-    # ========================================================
+    # --------------------------------------------------------
+    # Opponent-adjusted fallback factors
+    # --------------------------------------------------------
 
     elif fallback_diagnostics:
+
+        home_power = float(
+            fallback_diagnostics.get(
+                "home_power_rating",
+                0.0,
+            )
+            or 0.0
+        )
+
+        away_power = float(
+            fallback_diagnostics.get(
+                "away_power_rating",
+                0.0,
+            )
+            or 0.0
+        )
+
+        power_edge = (
+            home_power
+            -
+            away_power
+        )
+
+        if abs(
+            power_edge
+        ) >= 4.0:
+
+            leader = (
+                home
+                if power_edge > 0
+                else away
+            )
+
+            factors.append({
+                "label":
+                    "Opponent-Adjusted Strength",
+
+                "detail":
+                    (
+                        f"{leader} has a "
+                        f"{abs(power_edge):.1f} pt "
+                        "SRS-style power-rating advantage."
+                    ),
+
+                "impact":
+                    (
+                        "high"
+                        if abs(
+                            power_edge
+                        ) >= 15
+                        else "medium"
+                    ),
+            })
+
+        home_sos = float(
+            fallback_diagnostics.get(
+                "home_schedule_strength",
+                0.0,
+            )
+            or 0.0
+        )
+
+        away_sos = float(
+            fallback_diagnostics.get(
+                "away_schedule_strength",
+                0.0,
+            )
+            or 0.0
+        )
+
+        sos_edge = (
+            home_sos
+            -
+            away_sos
+        )
+
+        if abs(
+            sos_edge
+        ) >= 4.0:
+
+            leader = (
+                home
+                if sos_edge > 0
+                else away
+            )
+
+            factors.append({
+                "label":
+                    "Schedule Strength",
+
+                "detail":
+                    (
+                        f"{leader} has faced the "
+                        "stronger recent opponent profile."
+                    ),
+
+                "impact":
+                    "medium",
+            })
 
         home_profile = (
             fallback_diagnostics.get(
@@ -2270,7 +2869,6 @@ def _cfb_key_factors(
             )
         )
 
-
         home_games = (
             home_profile.get(
                 "games",
@@ -2285,102 +2883,11 @@ def _cfb_key_factors(
             )
         )
 
-
         if (
-            home_games > 0
-            and
-            away_games > 0
+            home_games <= 0
+            or
+            away_games <= 0
         ):
-
-            home_for = (
-                home_profile.get(
-                    "avg_pts_for",
-                    0,
-                )
-            )
-
-            away_for = (
-                away_profile.get(
-                    "avg_pts_for",
-                    0,
-                )
-            )
-
-
-            scoring_edge = (
-                home_for
-                -
-                away_for
-            )
-
-
-            if abs(
-                scoring_edge
-            ) >= 4:
-
-                leader = (
-                    home
-                    if scoring_edge > 0
-                    else away
-                )
-
-                factors.append({
-                    "label":
-                        "Recent Scoring",
-
-                    "detail":
-                        (
-                            f"{leader} has averaged "
-                            f"{abs(scoring_edge):.1f} "
-                            "more points per game across "
-                            "its recent historical sample."
-                        ),
-
-                    "impact":
-                        (
-                            "high"
-                            if abs(
-                                scoring_edge
-                            ) >= 8
-                            else "medium"
-                        ),
-                })
-
-
-            form_edge = (
-                fallback_diagnostics.get(
-                    "recent_form_edge",
-                    0,
-                )
-            )
-
-
-            if abs(
-                form_edge
-            ) >= 5:
-
-                leader = (
-                    home
-                    if form_edge > 0
-                    else away
-                )
-
-                factors.append({
-                    "label":
-                        "Recent Form",
-
-                    "detail":
-                        (
-                            f"{leader} has the stronger "
-                            "recent scoring-margin profile."
-                        ),
-
-                    "impact":
-                        "medium",
-                })
-
-
-        else:
 
             missing_history = []
 
@@ -2394,30 +2901,24 @@ def _cfb_key_factors(
                     away
                 )
 
+            factors.append({
+                "label":
+                    "Limited Historical Sample",
 
-            if missing_history:
+                "detail":
+                    (
+                        "Recent completed-game history "
+                        "was not available for "
+                        f"{', '.join(missing_history)}."
+                    ),
 
-                factors.append({
-                    "label":
-                        "Limited Historical Sample",
+                "impact":
+                    "low",
+            })
 
-                    "detail":
-                        (
-                            "Recent completed-game history "
-                            "was not available for "
-                            f"{', '.join(missing_history)}. "
-                            "The fallback therefore uses "
-                            "conservative scoring defaults."
-                        ),
-
-                    "impact":
-                        "low",
-                })
-
-
-    # ========================================================
+    # --------------------------------------------------------
     # Home field
-    # ========================================================
+    # --------------------------------------------------------
 
     if not features.get(
         "neutral_site",
@@ -2438,12 +2939,11 @@ def _cfb_key_factors(
                 "low",
         })
 
-
     return factors
 
 
 # ============================================================
-# Weekly Card Routes
+# Weekly Card
 # ============================================================
 
 @app.get("/card/{league}")
@@ -2465,7 +2965,6 @@ async def weekly_card(
             ),
         )
 
-
     if league.upper() not in (
         "NFL",
         "CFB",
@@ -2478,20 +2977,35 @@ async def weekly_card(
             ),
         )
 
-
     try:
 
         return (
             await generate_weekly_card(
-    league=league.upper(),
-    week=week,
-    season=season,
-    nfl_team_stats=app_state["nfl_team_stats"],
-    cfb_sp_lookup=app_state["cfb_sp_lookup"],
-    cfb_team_stats=app_state["cfb_team_stats"],
+                league=
+                    league.upper(),
+
+                week=
+                    week,
+
+                season=
+                    season,
+
+                nfl_team_stats=
+                    app_state[
+                        "nfl_team_stats"
+                    ],
+
+                cfb_sp_lookup=
+                    app_state[
+                        "cfb_sp_lookup"
+                    ],
+
+                cfb_team_stats=
+                    app_state[
+                        "cfb_team_stats"
+                    ],
             )
         )
-
 
     except Exception as exc:
 
@@ -2751,7 +3265,6 @@ async def refresh_injuries(
         secret
     )
 
-
     if league.upper() == "NFL":
 
         injuries = (
@@ -2762,7 +3275,6 @@ async def refresh_injuries(
             injuries,
             "NFL",
         )
-
 
     else:
 
@@ -2787,19 +3299,21 @@ async def refresh_injuries(
                     ),
                 )
 
-
         team_ids = [
-            team["id"]
+            team[
+                "id"
+            ]
             for team
             in app_state.get(
                 "cfb_teams",
                 [],
-            )[:30]
+            )[
+                :30
+            ]
             if team.get(
                 "id"
             )
         ]
-
 
         injuries = (
             await injury_engine.fetch_cfb_injuries(
@@ -2811,7 +3325,6 @@ async def refresh_injuries(
             injuries,
             "CFB",
         )
-
 
     return {
         "refreshed":
