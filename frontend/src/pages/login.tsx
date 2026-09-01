@@ -24,13 +24,15 @@ export default function Login() {
       setError("Enter your email and password.");
       return;
     }
+
     setError("");
     setSubmitting(true);
+
     try {
       await signIn(email, password);
-      // redirect handled by useEffect
     } catch (e: any) {
       const code = e?.code;
+
       if (
         code === "auth/invalid-credential" ||
         code === "auth/wrong-password" ||
@@ -47,7 +49,6 @@ export default function Login() {
     }
   };
 
-  // Show pending/denied state post-login
   if (!loading && user && userStatus === "pending") {
     return <PendingScreen email={user.email || ""} />;
   }
@@ -55,22 +56,37 @@ export default function Login() {
   return (
     <>
       <Head>
-        <title>Login — Prime Picks</title>
+        <title>Login — Prime Picks AI</title>
       </Head>
+
       <div className="field-bg min-h-screen flex items-center justify-center px-4">
         <div className="w-full max-w-sm">
           {/* Logo */}
-          <div className="text-center mb-10">
-            <div className="text-4xl mb-2">🏈</div>
-            <h1
-              className="score-display text-chalk"
-              style={{ fontSize: 32, letterSpacing: "0.1em" }}
+          <div className="text-center mb-8">
+            <Link
+              href="/"
+              aria-label="Prime Picks AI"
+              className="inline-block"
             >
-              PRIME PICKS
-            </h1>
+              <img
+                src="/images/primepicks-logo.png"
+                alt="Prime Picks AI"
+                style={{
+                  width: "320px",
+                  maxWidth: "90vw",
+                  height: "auto",
+                  margin: "0 auto",
+                  display: "block",
+                  objectFit: "contain",
+                }}
+              />
+            </Link>
+
             <p
-              className="text-slate text-xs mt-1"
-              style={{ fontFamily: "var(--font-mono)" }}
+              className="text-slate text-xs mt-2"
+              style={{
+                fontFamily: "var(--font-mono)",
+              }}
             >
               Score prediction engine
             </p>
@@ -79,7 +95,9 @@ export default function Login() {
           <div className="panel rounded-xl p-7">
             <h2
               className="text-chalk text-sm font-semibold mb-5 uppercase tracking-widest"
-              style={{ fontFamily: "var(--font-mono)" }}
+              style={{
+                fontFamily: "var(--font-mono)",
+              }}
             >
               Sign In
             </h2>
@@ -88,33 +106,44 @@ export default function Login() {
               <div>
                 <label
                   className="block text-xs text-slate mb-1 uppercase tracking-widest"
-                  style={{ fontFamily: "var(--font-mono)" }}
+                  style={{
+                    fontFamily: "var(--font-mono)",
+                  }}
                 >
                   Email
                 </label>
+
                 <input
                   type="email"
                   className="w-full rounded px-3 py-2.5 text-sm"
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
-                  onKeyDown={(e) => e.key === "Enter" && handleLogin()}
+                  onKeyDown={(e) =>
+                    e.key === "Enter" && handleLogin()
+                  }
                   placeholder="you@example.com"
                   autoComplete="email"
                 />
               </div>
+
               <div>
                 <label
                   className="block text-xs text-slate mb-1 uppercase tracking-widest"
-                  style={{ fontFamily: "var(--font-mono)" }}
+                  style={{
+                    fontFamily: "var(--font-mono)",
+                  }}
                 >
                   Password
                 </label>
+
                 <input
                   type="password"
                   className="w-full rounded px-3 py-2.5 text-sm"
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
-                  onKeyDown={(e) => e.key === "Enter" && handleLogin()}
+                  onKeyDown={(e) =>
+                    e.key === "Enter" && handleLogin()
+                  }
                   placeholder="••••••••"
                   autoComplete="current-password"
                 />
@@ -156,13 +185,17 @@ export default function Login() {
 
             <p
               className="text-center text-xs text-slate mt-5"
-              style={{ fontFamily: "var(--font-mono)" }}
+              style={{
+                fontFamily: "var(--font-mono)",
+              }}
             >
               Don't have access?{" "}
               <Link
                 href="/request-access"
                 className="text-gold"
-                style={{ color: "#C9A84C" }}
+                style={{
+                  color: "#C9A84C",
+                }}
               >
                 Request Access →
               </Link>
@@ -176,37 +209,76 @@ export default function Login() {
 
 function PendingScreen({ email }: { email: string }) {
   const { signOut } = useAuth();
+
   return (
     <>
       <Head>
-        <title>Pending Approval — Prime Picks</title>
+        <title>Pending Approval — Prime Picks AI</title>
       </Head>
+
       <div className="field-bg min-h-screen flex items-center justify-center px-4">
         <div className="panel rounded-xl p-8 max-w-sm w-full text-center">
-          <div className="text-4xl mb-4">⏳</div>
+          <img
+            src="/images/primepicks-logo.png"
+            alt="Prime Picks AI"
+            style={{
+              width: "260px",
+              maxWidth: "85vw",
+              height: "auto",
+              margin: "0 auto 24px",
+              display: "block",
+              objectFit: "contain",
+            }}
+          />
+
+          <div className="text-4xl mb-4">
+            ⏳
+          </div>
+
           <h2
             className="score-display text-chalk mb-2"
-            style={{ fontSize: 24, letterSpacing: "0.08em" }}
+            style={{
+              fontSize: 24,
+              letterSpacing: "0.08em",
+            }}
           >
             ACCESS PENDING
           </h2>
+
           <p
             className="text-slate text-sm mb-2"
-            style={{ fontFamily: "var(--font-mono)" }}
+            style={{
+              fontFamily: "var(--font-mono)",
+            }}
           >
             Your request is under review.
           </p>
+
           <p
             className="text-slate text-xs mb-6"
-            style={{ fontFamily: "var(--font-mono)" }}
+            style={{
+              fontFamily: "var(--font-mono)",
+            }}
           >
-            We'll email <span style={{ color: "#C9A84C" }}>{email}</span> once
-            approved.
+            We'll email{" "}
+            <span
+              style={{
+                color: "#C9A84C",
+              }}
+            >
+              {email}
+            </span>{" "}
+            once approved.
           </p>
+
           <button
             onClick={() => signOut()}
             className="text-xs text-slate underline"
-            style={{ background: "none", border: "none", cursor: "pointer" }}
+            style={{
+              background: "none",
+              border: "none",
+              cursor: "pointer",
+            }}
           >
             Sign out
           </button>
