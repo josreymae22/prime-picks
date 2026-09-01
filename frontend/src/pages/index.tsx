@@ -586,31 +586,28 @@ export default function Home() {
       <div className="field-bg min-h-screen px-4 py-10 md:py-16">
         <div className="max-w-4xl mx-auto mb-10">
 
-          <div className="flex items-center justify-between mb-2 flex-wrap gap-3">
+          <div className="flex items-center justify-between mb-2 flex-wrap gap-4">
 
-            <div className="flex items-center gap-3">
-
-              <span
+            <a
+              href="/"
+              className="flex items-center"
+              aria-label="Prime Picks AI Home"
+              style={{
+                textDecoration: "none",
+              }}
+            >
+              <img
+                src="/images/primepicks-logo.png"
+                alt="Prime Picks AI"
                 style={{
-                  fontSize: 28,
+                  width: "260px",
+                  maxWidth: "70vw",
+                  height: "auto",
+                  display: "block",
+                  objectFit: "contain",
                 }}
-              >
-                🏈
-              </span>
-
-              <h1
-                className="score-display text-chalk"
-                style={{
-                  fontSize: 42,
-                  letterSpacing:
-                    "0.08em",
-                  lineHeight: 1,
-                }}
-              >
-                PRIME PICKS
-              </h1>
-
-            </div>
+              />
+            </a>
 
             <nav
               className="flex gap-4 text-xs"
