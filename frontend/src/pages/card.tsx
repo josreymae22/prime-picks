@@ -108,6 +108,30 @@ type Disparity = {
 };
 
 
+type PlayFactor = {
+  label: string;
+  team?: string | null;
+  points?: number | null;
+  signed_points?: number | null;
+  impact?: 'high' | 'medium' | 'low' | string;
+  detail?: string;
+  source?: string;
+  group?: string | null;
+  top_players?: Array<{
+    name?: string;
+    impact_score?: number;
+    notes?: string;
+  }>;
+};
+
+type PlayExplanation = {
+  recommended_team?: string | null;
+  summary?: string;
+  factor_count?: number;
+  factors?: PlayFactor[];
+};
+
+
 type GameCard = {
   game_id?: string | number;
 
@@ -145,6 +169,9 @@ type GameCard = {
     home_injury: number;
     away_injury: number;
   };
+
+  key_factors?: PlayFactor[];
+  play_explanation?: PlayExplanation;
 
   fallback_diagnostics?: any;
 };
@@ -392,6 +419,237 @@ function getBorderColor(
   }
 
   return 'rgba(201,168,76,0.08)';
+}
+
+
+function ExplanationPanel({
+  game,
+  lowConfidence,
+  isFallback,
+}: {
+  game: GameCard;
+  lowConfidence: boolean;
+  isFallback: boolean;
+}) {
+  const factors =
+    game.play_explanation?.factors?.length
+      ? game.play_explanation.factors
+      : game.key_factors || [];
+
+  if (!game.play_explanation && factors.length === 0) {
+    return null;
+  }
+
+  const recommendedTeam =
+    game.play_explanation?.recommended_team || null;
+
+  const factorColor = (impact?: string) => {
+    if (impact === 'high') return '#C9A84C';
+    if (impact === 'medium') return '#8B9BB4';
+    return '#6B7C93';
+  };
+
+  const factorIcon = (label: string) => {
+    const value = label.toLowerCase();
+
+    if (value.includes('qb') || value.includes('quarterback')) return '🏈';
+    if (value.includes('injury')) return '✚';
+    if (value.includes('home field')) return '⌂';
+    if (value.includes('vegas') || value.includes('market')) return '↔';
+    if (value.includes('sp+') || value.includes('power') || value.includes('srs')) return '📈';
+    if (value.includes('defensive') || value.includes('secondary')) return '🛡';
+    return '◆';
+  };
+
+  return (
+    <div
+      className="rounded-xl p-4"
+      style={{
+        background: 'rgba(201,168,76,0.045)',
+        border: '1px solid rgba(201,168,76,0.16)',
+      }}
+    >
+      <div className="flex items-start justify-between gap-3 flex-wrap mb-3">
+        <div>
+          <div
+            className="score-display"
+            style={{
+              color: '#C9A84C',
+              fontSize: 14,
+              letterSpacing: '0.09em',
+            }}
+          >
+            WHY PRIME PICKS LIKES THIS PLAY
+          </div>
+
+          {recommendedTeam && (
+            <div
+              className="text-xs mt-1"
+              style={{
+                color: '#F0EEE6',
+                fontFamily: 'var(--font-mono)',
+              }}
+            >
+              Model lean:{' '}
+              <span style={{ color: '#C9A84C', fontWeight: 700 }}>
+                {recommendedTeam}
+              </span>
+            </div>
+          )}
+        </div>
+
+        {game.play_explanation?.factor_count != null && (
+          <span
+            className="text-xs px-2 py-1 rounded"
+            style={{
+              background: 'rgba(15,44,71,0.55)',
+              color: '#8B9BB4',
+              border: '1px solid rgba(139,155,180,0.15)',
+              fontFamily: 'var(--font-mono)',
+            }}
+          >
+            {game.play_explanation.factor_count}{' '}
+            factor{game.play_explanation.factor_count === 1 ? '' : 's'}
+          </span>
+        )}
+      </div>
+
+      {game.play_explanation?.summary && (
+        <p
+          className="text-xs mb-4"
+          style={{
+            color: '#A8B5C7',
+            fontFamily: 'var(--font-mono)',
+            lineHeight: 1.65,
+          }}
+        >
+          {game.play_explanation.summary}
+        </p>
+      )}
+
+      <div className="space-y-2">
+        {factors.map((factor, index) => {
+          const color = factorColor(factor.impact);
+          const supportsPick =
+            recommendedTeam && factor.team === recommendedTeam;
+
+          return (
+            <div
+              key={`${factor.label}-${index}`}
+              className="rounded-lg px-3 py-3"
+              style={{
+                background: supportsPick
+                  ? 'rgba(201,168,76,0.055)'
+                  : 'rgba(7,21,36,0.48)',
+                border: `1px solid ${color}24`,
+              }}
+            >
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span aria-hidden="true" style={{ fontSize: 12 }}>
+                      {factorIcon(factor.label)}
+                    </span>
+
+                    <span
+                      className="text-xs font-semibold"
+                      style={{
+                        color,
+                        fontFamily: 'var(--font-mono)',
+                      }}
+                    >
+                      {factor.label}
+                    </span>
+
+                    {factor.team && (
+                      <span
+                        className="text-xs"
+                        style={{
+                          color: supportsPick ? '#C9A84C' : '#8B9BB4',
+                          fontFamily: 'var(--font-mono)',
+                        }}
+                      >
+                        {factor.team}
+                      </span>
+                    )}
+
+                    {factor.impact && (
+                      <span
+                        className="text-xs px-1.5 py-0.5 rounded uppercase"
+                        style={{
+                          color,
+                          background: `${color}10`,
+                          border: `1px solid ${color}20`,
+                          fontFamily: 'var(--font-mono)',
+                          fontSize: 9,
+                          letterSpacing: '0.07em',
+                        }}
+                      >
+                        {factor.impact}
+                      </span>
+                    )}
+                  </div>
+
+                  {factor.detail && (
+                    <div
+                      className="text-xs mt-1.5"
+                      style={{
+                        color: '#8B9BB4',
+                        fontFamily: 'var(--font-mono)',
+                        lineHeight: 1.55,
+                      }}
+                    >
+                      {factor.detail}
+                    </div>
+                  )}
+                </div>
+
+                {factor.points != null && (
+                  <div
+                    className="score-display shrink-0"
+                    style={{
+                      color,
+                      fontSize: 17,
+                      letterSpacing: '0.04em',
+                    }}
+                  >
+                    +{Number(factor.points).toFixed(1)}
+                    <span
+                      style={{
+                        fontSize: 9,
+                        marginLeft: 3,
+                        color: '#596A80',
+                      }}
+                    >
+                      PTS
+                    </span>
+                  </div>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {lowConfidence && (
+        <div
+          className="mt-3 text-xs rounded px-3 py-2"
+          style={{
+            background: 'rgba(201,168,76,0.05)',
+            border: '1px solid rgba(201,168,76,0.12)',
+            color: '#8B9BB4',
+            fontFamily: 'var(--font-mono)',
+            lineHeight: 1.5,
+          }}
+        >
+          ⚠ Lower-confidence projection.{' '}
+          {isFallback
+            ? 'SP+ coverage is incomplete, so Prime Picks is using the opponent-adjusted SRS fallback for this matchup.'
+            : 'Treat this edge more cautiously than a standard-confidence model result.'}
+        </div>
+      )}
+    </div>
+  );
 }
 
 
@@ -1975,6 +2233,13 @@ export default function CardPage() {
                                 'rgba(201,168,76,0.1)',
                             }}
                           >
+
+                            <ExplanationPanel
+                              game={game}
+                              lowConfidence={lowConfidence}
+                              isFallback={isFallback}
+                            />
+
 
                             <div>
 
