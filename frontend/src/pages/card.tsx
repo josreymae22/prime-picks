@@ -10,6 +10,10 @@ const API =
   process.env.NEXT_PUBLIC_API_URL ||
   'http://localhost:8000';
 
+// September 2026 = 2026 season.
+// Keeping this dynamic means it automatically moves forward next year.
+const CURRENT_SEASON = new Date().getFullYear();
+
 
 const EDGE_COLORS: Record<string, string> = {
   fade_away: '#D94040',
@@ -553,17 +557,40 @@ export default function CardPage() {
               {
                 params: {
                   week,
+                  season:
+                    CURRENT_SEASON,
                 },
               }
             );
 
+          const data =
+            r.data as CardData;
+
+          if (
+            data.error &&
+            (
+              !data.games ||
+              data.games.length === 0
+            )
+          ) {
+            setError(
+              data.error
+            );
+          }
+
           setCard(
-            r.data
+            data
           );
 
         } catch (e: any) {
+          console.error(
+            'Weekly card request failed:',
+            e
+          );
+
           setError(
             e?.response?.data?.detail ||
+            e?.message ||
             'Failed to load card.'
           );
 
@@ -602,9 +629,6 @@ export default function CardPage() {
 
   // ========================================================
   // Filtering
-  //
-  // IMPORTANT:
-  // Use confidence-adjusted ranking_score when available.
   // ========================================================
 
   const displayed =
@@ -648,41 +672,51 @@ export default function CardPage() {
     <>
       <Head>
         <title>
-          Weekly Card — Prime Picks
+          Weekly Card — Prime Picks AI
         </title>
+
+        <meta
+          name="description"
+          content="Prime Picks NFL and NCAA weekly prediction card"
+        />
       </Head>
 
       <div className="field-bg min-h-screen px-4 py-10">
+
         <div className="max-w-5xl mx-auto">
 
           {/* =================================================
               Header
           ================================================= */}
 
-          <div className="flex items-center justify-between mb-2 flex-wrap gap-3">
+          <div className="flex items-center justify-between mb-3 flex-wrap gap-4">
 
-            <div className="flex items-center gap-3">
-
-              <span
+            <Link
+              href="/"
+              aria-label="Prime Picks AI Home"
+              className="flex items-center"
+            >
+              <img
+                src="/images/primepicks-logo.png"
+                alt="Prime Picks AI"
                 style={{
-                  fontSize: 28,
-                }}
-              >
-                🏈
-              </span>
+                  width:
+                    '250px',
 
-              <h1
-                className="score-display text-chalk"
-                style={{
-                  fontSize: 36,
-                  letterSpacing:
-                    '0.08em',
-                }}
-              >
-                PRIME PICKS
-              </h1>
+                  maxWidth:
+                    '65vw',
 
-            </div>
+                  height:
+                    'auto',
+
+                  display:
+                    'block',
+
+                  objectFit:
+                    'contain',
+                }}
+              />
+            </Link>
 
 
             <nav
@@ -792,6 +826,14 @@ export default function CardPage() {
                           setCard(
                             null
                           );
+
+                          setError(
+                            ''
+                          );
+
+                          setExpandedGame(
+                            null
+                          );
                         }}
 
                         className="score-display px-4 py-2 rounded"
@@ -860,17 +902,26 @@ export default function CardPage() {
                   }
 
                   onChange={
-                    e =>
+                    e => {
                       setWeek(
                         Number(
                           e.target.value
                         )
-                      )
+                      );
+
+                      setCard(
+                        null
+                      );
+
+                      setError(
+                        ''
+                      );
+                    }
                   }
 
                   style={{
                     minWidth:
-                      90,
+                      100,
                   }}
                 >
 
@@ -896,6 +947,46 @@ export default function CardPage() {
                   )}
 
                 </select>
+
+              </div>
+
+
+              <div>
+
+                <label
+                  className="block text-xs text-slate mb-1 uppercase tracking-widest"
+                  style={{
+                    fontFamily:
+                      'var(--font-mono)',
+                  }}
+                >
+                  Season
+                </label>
+
+                <div
+                  className="rounded px-3 py-2 text-sm"
+                  style={{
+                    background:
+                      'rgba(15,44,71,0.5)',
+
+                    border:
+                      '1px solid rgba(201,168,76,0.15)',
+
+                    color:
+                      '#8B9BB4',
+
+                    fontFamily:
+                      'var(--font-mono)',
+
+                    minWidth:
+                      90,
+
+                    textAlign:
+                      'center',
+                  }}
+                >
+                  {CURRENT_SEASON}
+                </div>
 
               </div>
 
@@ -989,11 +1080,29 @@ export default function CardPage() {
 
               <div className="flex items-center justify-between mb-4 flex-wrap gap-3">
 
-                <div className="flex gap-4 flex-wrap">
+                <div className="flex gap-4 flex-wrap items-center">
 
                   <span className="text-chalk text-sm font-semibold">
-                    {card.league}{' '}
+                    {card.league ===
+                    'CFB'
+                      ? 'NCAAF'
+                      : card.league}{' '}
                     Week {card.week}
+                  </span>
+
+                  <span
+                    className="text-xs"
+                    style={{
+                      color:
+                        '#C9A84C',
+
+                      fontFamily:
+                        'var(--font-mono)',
+                    }}
+                  >
+                    {card.season ??
+                      CURRENT_SEASON}{' '}
+                    Season
                   </span>
 
                   <span
@@ -1146,7 +1255,12 @@ export default function CardPage() {
                       : filter ===
                           'sharp'
                         ? 'No sharp movement detected yet.'
-                        : 'No games found.'}
+                        : `No ${
+                            league ===
+                            'CFB'
+                              ? 'NCAAF'
+                              : league
+                          } games found for Week ${week}, ${CURRENT_SEASON}.`}
                   </p>
 
                 </div>
@@ -1183,10 +1297,6 @@ export default function CardPage() {
                       d.ranking_score ??
                       d.edge_score ??
                       0;
-
-                    const isMedEdge =
-                      rankingScore >=
-                      8;
 
                     const isSteam =
                       d.steam_move;
@@ -1272,8 +1382,6 @@ export default function CardPage() {
 
                               <div className="flex gap-2 flex-wrap mb-2">
 
-                                {/* BACKEND-CONTROLLED EDGE BADGE */}
-
                                 {showEdgeBadge && (
                                   <span
                                     className="score-display text-xs px-2 py-0.5 rounded"
@@ -1289,8 +1397,6 @@ export default function CardPage() {
                                   </span>
                                 )}
 
-
-                                {/* LOW CONFIDENCE */}
 
                                 {lowConfidence && (
                                   <span
@@ -1315,8 +1421,6 @@ export default function CardPage() {
                                 )}
 
 
-                                {/* FALLBACK */}
-
                                 {isFallback && (
                                   <span
                                     className="text-xs px-2 py-0.5 rounded"
@@ -1340,8 +1444,6 @@ export default function CardPage() {
                                 )}
 
 
-                                {/* STEAM */}
-
                                 {isSteam && (
                                   <span
                                     className="score-display text-xs px-2 py-0.5 rounded"
@@ -1364,8 +1466,6 @@ export default function CardPage() {
                                   </span>
                                 )}
 
-
-                                {/* OFFICIAL */}
 
                                 {isOfficialPick && (
                                   <span
@@ -1393,8 +1493,6 @@ export default function CardPage() {
                                 )}
 
 
-                                {/* SHARP */}
-
                                 {isSharp &&
                                   !isSteam && (
                                   <span
@@ -1418,8 +1516,6 @@ export default function CardPage() {
                                   </span>
                                 )}
 
-
-                                {/* ALIGNED */}
 
                                 {d.sharp_aligned && (
                                   <span
@@ -1447,8 +1543,6 @@ export default function CardPage() {
 
 
                               <div className="flex items-center gap-3">
-
-                                {/* AWAY */}
 
                                 <div className="text-center">
 
@@ -1494,8 +1588,6 @@ export default function CardPage() {
                                   @
                                 </div>
 
-
-                                {/* HOME */}
 
                                 <div className="text-center">
 
@@ -1571,8 +1663,6 @@ export default function CardPage() {
                               </div>
 
 
-                              {/* SPREAD */}
-
                               <div className="grid grid-cols-3 gap-1 text-center mb-1">
 
                                 <div
@@ -1612,8 +1702,6 @@ export default function CardPage() {
                               </div>
 
 
-                              {/* TOTAL */}
-
                               <div className="grid grid-cols-3 gap-1 text-center mb-3">
 
                                 <div
@@ -1645,8 +1733,6 @@ export default function CardPage() {
 
                               </div>
 
-
-                              {/* EDGE DETAILS */}
 
                               <div className="flex flex-col gap-1">
 
@@ -1748,10 +1834,6 @@ export default function CardPage() {
                           </div>
 
 
-                          {/* ===============================
-                              Model note
-                          =============================== */}
-
                           {game.model_note && (
                             <div
                               className="mt-3 text-xs px-2 py-1.5 rounded"
@@ -1774,10 +1856,6 @@ export default function CardPage() {
                             </div>
                           )}
 
-
-                          {/* ===============================
-                              Quick injury flags
-                          =============================== */}
 
                           {(
                             game.home_injury_notes.length >
@@ -1898,10 +1976,6 @@ export default function CardPage() {
                             }}
                           >
 
-                            {/* ===============================
-                                Model
-                            =============================== */}
-
                             <div>
 
                               <div
@@ -1998,10 +2072,6 @@ export default function CardPage() {
                             </div>
 
 
-                            {/* ===============================
-                                Line movement
-                            =============================== */}
-
                             {game.line_movement && (
                               <div>
 
@@ -2032,10 +2102,6 @@ export default function CardPage() {
                               </div>
                             )}
 
-
-                            {/* ===============================
-                                Home injuries
-                            =============================== */}
 
                             {game.home_injury_notes.length >
                               0 && (
@@ -2084,10 +2150,6 @@ export default function CardPage() {
                             )}
 
 
-                            {/* ===============================
-                                Away injuries
-                            =============================== */}
-
                             {game.away_injury_notes.length >
                               0 && (
                               <div>
@@ -2135,10 +2197,6 @@ export default function CardPage() {
                             )}
 
 
-                            {/* ===============================
-                                Rating adjustments
-                            =============================== */}
-
                             <div>
 
                               <div
@@ -2154,7 +2212,7 @@ export default function CardPage() {
 
 
                               <div
-                                className="grid grid-cols-2 gap-2 text-xs"
+                                className="grid grid-cols-1 md:grid-cols-2 gap-2 text-xs"
 
                                 style={{
                                   fontFamily:
@@ -2201,7 +2259,7 @@ export default function CardPage() {
                                         a.label
                                       }
 
-                                      className="flex justify-between"
+                                      className="flex justify-between gap-3"
                                     >
 
                                       <span className="text-slate">
@@ -2240,10 +2298,6 @@ export default function CardPage() {
 
                             </div>
 
-
-                            {/* ===============================
-                                Confidence interval
-                            =============================== */}
 
                             <div>
 
@@ -2336,10 +2390,6 @@ export default function CardPage() {
               </div>
 
 
-              {/* =============================================
-                  Footer
-              ============================================= */}
-
               <p
                 className="text-center text-xs text-slate mt-6"
 
@@ -2362,10 +2412,6 @@ export default function CardPage() {
             </>
           )}
 
-
-          {/* =================================================
-              Empty state
-          ================================================= */}
 
           {!card &&
             !loading && (
@@ -2405,6 +2451,7 @@ export default function CardPage() {
           )}
 
         </div>
+
       </div>
     </>
   );
