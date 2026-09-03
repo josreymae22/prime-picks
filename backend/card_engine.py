@@ -9,6 +9,7 @@ Generates the weekly Prime Picks card:
   5. Apply injury adjustments
   6. Apply line movement features
   7. Rank games by confidence-adjusted edge size
+  8. Explain WHY Prime Picks likes a play
 
 CFB prediction behavior:
 - Both teams have SP+ -> trained CFB model
@@ -19,6 +20,14 @@ Confidence behavior:
 - Opponent-adjusted CFB fallback edges retain raw Vegas disagreement
 - Fallback edges receive a reduced ranking score
 - Fallback games cannot be presented as high-confidence Strong Edges
+
+Explanation behavior:
+- Position-group factors come directly from roster_engine ratings/weights
+- Home-field value comes from model inputs
+- Injury values come from injury_engine adjustments
+- SP+/SRS values come from existing model features/diagnostics
+- Vegas disagreement comes from calculated disparity
+- Sharp/steam signals come from line movement snapshots
 """
 
 import logging
@@ -86,6 +95,39 @@ def _clip(
     )
 
 
+def _factor_impact(
+    points: float,
+) -> str:
+    """
+    Convert factor point magnitude into frontend impact tier.
+    """
+
+    magnitude = abs(
+        float(points or 0)
+    )
+
+    if magnitude >= 2.0:
+        return "high"
+
+    if magnitude >= 0.75:
+        return "medium"
+
+    return "low"
+
+
+def _safe_float(
+    value,
+    default: float = 0.0,
+) -> float:
+    try:
+        return float(value)
+    except (
+        TypeError,
+        ValueError,
+    ):
+        return default
+
+
 # ============================================================
 # CFB opponent-adjusted fallback prediction
 # ============================================================
@@ -96,23 +138,6 @@ def predict_cfb_fallback(
     team_stats: dict,
     neutral_site: bool = False,
 ) -> tuple[dict, dict]:
-    """
-    Opponent-adjusted CFB fallback.
-
-    This MUST match the fallback logic used by main.py /predict.
-
-    Used only when one or both teams lack complete SP+ data.
-
-    Combines:
-    1. Recent scoring offense/defense
-    2. SRS-style opponent-adjusted team strength
-    3. Schedule strength
-    4. Home-field advantage
-
-    This prevents a lower-level team with strong raw scoring numbers
-    against weak competition from being treated as equivalent to an
-    FBS team facing substantially stronger opposition.
-    """
 
     default_profile = {
         "avg_pts_for": 27.0,
@@ -141,10 +166,6 @@ def predict_cfb_fallback(
         if neutral_site
         else 3.0
     )
-
-    # --------------------------------------------------------
-    # Raw scoring projection
-    # --------------------------------------------------------
 
     raw_home_score = (
         (
@@ -188,10 +209,6 @@ def predict_cfb_fallback(
         raw_away_score
     )
 
-    # --------------------------------------------------------
-    # Opponent-adjusted SRS power
-    # --------------------------------------------------------
-
     home_power = float(
         home.get(
             "power_rating",
@@ -220,14 +237,6 @@ def predict_cfb_fallback(
         hfa
     )
 
-    # --------------------------------------------------------
-    # Blend raw scoring + opponent-adjusted rating
-    #
-    # Match main.py:
-    #   25% raw scoring
-    #   75% SRS/opponent-adjusted power
-    # --------------------------------------------------------
-
     predicted_margin = (
         0.25
         *
@@ -242,17 +251,12 @@ def predict_cfb_fallback(
         power_margin
     )
 
-    # --------------------------------------------------------
-    # Total projection
-    # --------------------------------------------------------
-
     predicted_total = _clip(
         raw_total,
         34.0,
         85.0,
     )
 
-    # Prevent absurd margins.
     predicted_margin = _clip(
         predicted_margin,
         -45.0,
@@ -271,10 +275,6 @@ def predict_cfb_fallback(
         -max_margin_from_total,
         max_margin_from_total,
     )
-
-    # --------------------------------------------------------
-    # Convert total + margin to scores
-    # --------------------------------------------------------
 
     home_score = (
         predicted_total
@@ -309,10 +309,6 @@ def predict_cfb_fallback(
         -
         away_score
     )
-
-    # --------------------------------------------------------
-    # Wider uncertainty than trained SP+ model
-    # --------------------------------------------------------
 
     margin_rmse = 16.0
     total_rmse = 19.0
@@ -534,10 +530,6 @@ def apply_all_adjustments(
         "movement": {},
     }
 
-    # --------------------------------------------------------
-    # Roster adjustments
-    # --------------------------------------------------------
-
     home_roster_adj = (
         roster_engine.get_team_adjustment(
             home_team
@@ -551,10 +543,6 @@ def apply_all_adjustments(
         )
         or 0.0
     )
-
-    # --------------------------------------------------------
-    # Injury adjustments
-    # --------------------------------------------------------
 
     home_inj = (
         injury_engine.get_injury_adjustment(
@@ -586,10 +574,6 @@ def apply_all_adjustments(
         )
     )
 
-    # --------------------------------------------------------
-    # Movement
-    # --------------------------------------------------------
-
     movement_feats = (
         snapshotter.get_model_features(
             home_team,
@@ -620,10 +604,6 @@ def apply_all_adjustments(
         "away_injury_adj"
     ] = away_injury_adj
 
-    # --------------------------------------------------------
-    # NFL adjustments
-    # --------------------------------------------------------
-
     if "home_margin_avg" in adjusted:
 
         adjusted[
@@ -651,12 +631,6 @@ def apply_all_adjustments(
             +
             away_injury_adj
         )
-
-    # --------------------------------------------------------
-    # CFB SP+ adjustments
-    #
-    # Only adjust SP+ values if both teams have actual SP+.
-    # --------------------------------------------------------
 
     if (
         features.get(
@@ -765,10 +739,6 @@ def apply_fallback_margin_adjustments(
     prediction: dict,
     adj_summary: dict,
 ) -> dict:
-    """
-    Apply roster and injury adjustments to fallback predictions
-    without pretending they are SP+ inputs.
-    """
 
     result = prediction.copy()
 
@@ -875,7 +845,6 @@ def apply_fallback_margin_adjustments(
         1,
     )
 
-    # Keep same uncertainty as SRS fallback.
     margin_rmse = 16.0
 
     result[
@@ -977,19 +946,6 @@ def calculate_disparity(
             True
     }
 
-    # --------------------------------------------------------
-    # Spread
-    #
-    # line["spread"] is HOME TEAM spread.
-    #
-    # Example:
-    # UCF -41.5
-    #
-    # Vegas implied HOME margin = +41.5.
-    #
-    # Prime Picks positive margin also means HOME favored.
-    # --------------------------------------------------------
-
     if vegas_spread is not None:
 
         vegas_home_margin = (
@@ -1032,14 +988,12 @@ def calculate_disparity(
 
         elif spread_disp > 0:
 
-            # Prime Picks thinks home is stronger than market.
             result[
                 "spread_edge_type"
             ] = "lean_home"
 
         else:
 
-            # Prime Picks thinks away covers relative to market.
             result[
                 "spread_edge_type"
             ] = "lean_away"
@@ -1061,10 +1015,6 @@ def calculate_disparity(
         result[
             "spread_edge_type"
         ] = None
-
-    # --------------------------------------------------------
-    # Total
-    # --------------------------------------------------------
 
     if vegas_total is not None:
 
@@ -1121,10 +1071,6 @@ def calculate_disparity(
             "total_edge_type"
         ] = None
 
-    # --------------------------------------------------------
-    # Raw edge score
-    # --------------------------------------------------------
-
     spread_score = (
         abs(
             result.get(
@@ -1152,10 +1098,6 @@ def calculate_disparity(
         +
         total_score
     )
-
-    # --------------------------------------------------------
-    # Movement
-    # --------------------------------------------------------
 
     if movement.get(
         "has_movement_data"
@@ -1298,10 +1240,6 @@ def apply_prediction_confidence(
     prediction_mode: str,
     league: str,
 ) -> dict:
-    """
-    Preserve actual Vegas disagreement while reducing ranking
-    confidence for opponent-adjusted fallback CFB predictions.
-    """
 
     result = disparity.copy()
 
@@ -1343,10 +1281,6 @@ def apply_prediction_confidence(
         "low_confidence"
     ] = False
 
-    # --------------------------------------------------------
-    # Opponent-adjusted CFB fallback
-    # --------------------------------------------------------
-
     if (
         league.upper()
         ==
@@ -1365,10 +1299,6 @@ def apply_prediction_confidence(
             "low_confidence"
         ] = True
 
-        # Better than old raw fallback, but still not as complete
-        # as current SP+.
-        #
-        # Give it 40% ranking strength instead of the previous 25%.
         result[
             "ranking_score"
         ] = round(
@@ -1404,8 +1334,6 @@ def apply_prediction_confidence(
 
         return result
 
-    # Backward compatibility in case an older prediction still
-    # returns historical_fallback.
     if (
         league.upper()
         ==
@@ -1438,10 +1366,6 @@ def apply_prediction_confidence(
         ] = "⚠ Legacy Fallback Lean"
 
         return result
-
-    # --------------------------------------------------------
-    # Trained models
-    # --------------------------------------------------------
 
     if prediction_mode in (
         "trained_model",
@@ -1548,6 +1472,752 @@ def _format_injury_notes(
 
 
 # ============================================================
+# NEW: Play explanation builder
+# ============================================================
+
+def build_play_explanation(
+    home_team: str,
+    away_team: str,
+    league: str,
+    neutral_site: bool,
+    features: dict,
+    prediction: dict,
+    disparity: dict,
+    adj_summary: dict,
+    prediction_mode: str,
+    fallback_diagnostics: Optional[dict] = None,
+) -> dict:
+    """
+    Build a human-readable model explanation using actual
+    model/roster/injury/market inputs.
+
+    No AI-generated or fabricated point values are used here.
+    """
+
+    factors = []
+
+    # --------------------------------------------------------
+    # 1. POSITION GROUP FACTORS
+    # --------------------------------------------------------
+
+    try:
+
+        roster_factors = (
+            roster_engine
+            .get_matchup_explanation_factors(
+                home_team,
+                away_team,
+                minimum_points=0.05,
+                limit=5,
+            )
+        )
+
+        for factor in roster_factors:
+
+            factors.append({
+                "label":
+                    factor.get(
+                        "label",
+                        "Roster Matchup",
+                    ),
+
+                "team":
+                    factor.get(
+                        "team"
+                    ),
+
+                "points":
+                    round(
+                        _safe_float(
+                            factor.get(
+                                "points",
+                                0,
+                            )
+                        ),
+                        2,
+                    ),
+
+                "signed_points":
+                    round(
+                        _safe_float(
+                            factor.get(
+                                "signed_points",
+                                0,
+                            )
+                        ),
+                        2,
+                    ),
+
+                "impact":
+                    factor.get(
+                        "impact",
+                        "low",
+                    ),
+
+                "detail":
+                    factor.get(
+                        "detail",
+                        "",
+                    ),
+
+                "source":
+                    "roster",
+
+                "group":
+                    factor.get(
+                        "group"
+                    ),
+
+                "top_players":
+                    factor.get(
+                        "top_players",
+                        [],
+                    ),
+            })
+
+    except Exception as exc:
+
+        logger.debug(
+            "Could not build position explanation for %s @ %s: %s",
+            away_team,
+            home_team,
+            exc,
+        )
+
+    # --------------------------------------------------------
+    # 2. INJURY FACTORS
+    # --------------------------------------------------------
+
+    home_injury_adj = _safe_float(
+        adj_summary.get(
+            "home_injury_adj",
+            0,
+        )
+    )
+
+    away_injury_adj = _safe_float(
+        adj_summary.get(
+            "away_injury_adj",
+            0,
+        )
+    )
+
+    injury_edge = (
+        home_injury_adj
+        -
+        away_injury_adj
+    )
+
+    if abs(
+        injury_edge
+    ) >= 0.10:
+
+        favored_team = (
+            home_team
+            if injury_edge > 0
+            else away_team
+        )
+
+        disadvantaged_team = (
+            away_team
+            if injury_edge > 0
+            else home_team
+        )
+
+        magnitude = abs(
+            injury_edge
+        )
+
+        factors.append({
+            "label":
+                "Injury Advantage",
+
+            "team":
+                favored_team,
+
+            "points":
+                round(
+                    magnitude,
+                    2,
+                ),
+
+            "signed_points":
+                round(
+                    injury_edge,
+                    2,
+                ),
+
+            "impact":
+                _factor_impact(
+                    magnitude
+                ),
+
+            "detail":
+                (
+                    f"{favored_team} gains approximately "
+                    f"{magnitude:.2f} model points relative to "
+                    f"{disadvantaged_team} from current injury adjustments."
+                ),
+
+            "source":
+                "injuries",
+        })
+
+    # --------------------------------------------------------
+    # 3. HOME FIELD
+    # --------------------------------------------------------
+
+    if not neutral_site:
+
+        hfa = 3.0
+
+        # Prefer actual value if the feature set exposes it.
+        if "home_field" in features:
+
+            feature_hfa = _safe_float(
+                features.get(
+                    "home_field",
+                    3.0,
+                ),
+                3.0,
+            )
+
+            if abs(
+                feature_hfa
+            ) > 0:
+                hfa = feature_hfa
+
+        elif fallback_diagnostics:
+
+            hfa = _safe_float(
+                fallback_diagnostics.get(
+                    "home_field_advantage",
+                    3.0,
+                ),
+                3.0,
+            )
+
+        factors.append({
+            "label":
+                "Home Field",
+
+            "team":
+                home_team,
+
+            "points":
+                round(
+                    abs(
+                        hfa
+                    ),
+                    2,
+                ),
+
+            "signed_points":
+                round(
+                    hfa,
+                    2,
+                ),
+
+            "impact":
+                _factor_impact(
+                    hfa
+                ),
+
+            "detail":
+                (
+                    f"{home_team} receives a "
+                    f"{hfa:+.1f} point home-field adjustment."
+                ),
+
+            "source":
+                "model",
+        })
+
+    # --------------------------------------------------------
+    # 4. CFB SP+ GAP
+    # --------------------------------------------------------
+
+    if (
+        league.upper() == "CFB"
+        and
+        prediction_mode == "trained_sp_model"
+    ):
+
+        home_sp = features.get(
+            "home_sp_overall"
+        )
+
+        away_sp = features.get(
+            "away_sp_overall"
+        )
+
+        if (
+            home_sp is not None
+            and
+            away_sp is not None
+        ):
+
+            sp_gap = (
+                _safe_float(
+                    home_sp
+                )
+                -
+                _safe_float(
+                    away_sp
+                )
+            )
+
+            if abs(
+                sp_gap
+            ) >= 0.5:
+
+                favored_team = (
+                    home_team
+                    if sp_gap > 0
+                    else away_team
+                )
+
+                factors.append({
+                    "label":
+                        "SP+ Rating Gap",
+
+                    "team":
+                        favored_team,
+
+                    "points":
+                        round(
+                            abs(
+                                sp_gap
+                            ),
+                            2,
+                        ),
+
+                    "signed_points":
+                        round(
+                            sp_gap,
+                            2,
+                        ),
+
+                    "impact":
+                        _factor_impact(
+                            sp_gap
+                        ),
+
+                    "detail":
+                        (
+                            f"{favored_team} has the stronger SP+ profile "
+                            f"by {abs(sp_gap):.1f} rating points."
+                        ),
+
+                    "source":
+                        "sp_plus",
+                })
+
+    # --------------------------------------------------------
+    # 5. CFB SRS / POWER GAP
+    # --------------------------------------------------------
+
+    if (
+        league.upper() == "CFB"
+        and
+        prediction_mode
+        ==
+        "opponent_adjusted_fallback"
+        and
+        fallback_diagnostics
+    ):
+
+        power_edge = _safe_float(
+            fallback_diagnostics.get(
+                "power_rating_edge",
+                0,
+            )
+        )
+
+        if abs(
+            power_edge
+        ) >= 0.5:
+
+            favored_team = (
+                home_team
+                if power_edge > 0
+                else away_team
+            )
+
+            factors.append({
+                "label":
+                    "Opponent-Adjusted Power",
+
+                "team":
+                    favored_team,
+
+                "points":
+                    round(
+                        abs(
+                            power_edge
+                        ),
+                        2,
+                    ),
+
+                "signed_points":
+                    round(
+                        power_edge,
+                        2,
+                    ),
+
+                "impact":
+                    _factor_impact(
+                        power_edge
+                    ),
+
+                "detail":
+                    (
+                        f"{favored_team} leads the opponent-adjusted "
+                        f"SRS/power comparison by "
+                        f"{abs(power_edge):.1f} rating points."
+                    ),
+
+                "source":
+                    "srs",
+            })
+
+        raw_scoring_margin = _safe_float(
+            fallback_diagnostics.get(
+                "raw_scoring_margin",
+                0,
+            )
+        )
+
+        if abs(
+            raw_scoring_margin
+        ) >= 1.0:
+
+            favored_team = (
+                home_team
+                if raw_scoring_margin > 0
+                else away_team
+            )
+
+            factors.append({
+                "label":
+                    "Recent Scoring",
+
+                "team":
+                    favored_team,
+
+                "points":
+                    round(
+                        abs(
+                            raw_scoring_margin
+                        ),
+                        2,
+                    ),
+
+                "signed_points":
+                    round(
+                        raw_scoring_margin,
+                        2,
+                    ),
+
+                "impact":
+                    _factor_impact(
+                        raw_scoring_margin
+                    ),
+
+                "detail":
+                    (
+                        f"Recent offensive/defensive scoring profiles "
+                        f"favor {favored_team} by approximately "
+                        f"{abs(raw_scoring_margin):.1f} points."
+                    ),
+
+                "source":
+                    "recent_form",
+            })
+
+    # --------------------------------------------------------
+    # 6. VEGAS SPREAD DISAGREEMENT
+    # --------------------------------------------------------
+
+    spread_disparity = (
+        disparity.get(
+            "spread_disparity"
+        )
+    )
+
+    if spread_disparity is not None:
+
+        spread_disparity = _safe_float(
+            spread_disparity
+        )
+
+        if abs(
+            spread_disparity
+        ) >= 1.5:
+
+            favored_team = (
+                home_team
+                if spread_disparity > 0
+                else away_team
+            )
+
+            factors.append({
+                "label":
+                    "Model vs Vegas",
+
+                "team":
+                    favored_team,
+
+                "points":
+                    round(
+                        abs(
+                            spread_disparity
+                        ),
+                        2,
+                    ),
+
+                "signed_points":
+                    round(
+                        spread_disparity,
+                        2,
+                    ),
+
+                "impact":
+                    _factor_impact(
+                        spread_disparity
+                    ),
+
+                "detail":
+                    (
+                        f"Prime Picks differs from the Vegas spread "
+                        f"by {abs(spread_disparity):.1f} points "
+                        f"in favor of {favored_team}."
+                    ),
+
+                "source":
+                    "market",
+            })
+
+    # --------------------------------------------------------
+    # 7. SHARP / STEAM MOVEMENT
+    # --------------------------------------------------------
+
+    movement = (
+        adj_summary.get(
+            "movement",
+            {},
+        )
+        or {}
+    )
+
+    sharp_signal = _safe_float(
+        movement.get(
+            "sharp_signal",
+            0,
+        )
+    )
+
+    steam_move = bool(
+        movement.get(
+            "steam_move",
+            False,
+        )
+    )
+
+    move_direction = movement.get(
+        "move_direction"
+    )
+
+    if (
+        sharp_signal >= 0.40
+        or
+        steam_move
+    ):
+
+        movement_team = None
+
+        if (
+            move_direction
+            ==
+            "toward_home"
+        ):
+            movement_team = home_team
+
+        elif (
+            move_direction
+            ==
+            "toward_away"
+        ):
+            movement_team = away_team
+
+        if movement_team:
+
+            movement_strength = (
+                sharp_signal * 2.0
+            )
+
+            if steam_move:
+                movement_strength += 1.0
+
+            factors.append({
+                "label":
+                    (
+                        "Steam Move"
+                        if steam_move
+                        else
+                        "Sharp Action"
+                    ),
+
+                "team":
+                    movement_team,
+
+                "points":
+                    round(
+                        movement_strength,
+                        2,
+                    ),
+
+                "signed_points":
+                    None,
+
+                "impact":
+                    (
+                        "high"
+                        if steam_move
+                        else "medium"
+                    ),
+
+                "detail":
+                    (
+                        f"Recent betting-market movement is "
+                        f"toward {movement_team}. "
+                        f"Sharp signal: "
+                        f"{sharp_signal * 100:.0f}%."
+                    ),
+
+                "source":
+                    "market_movement",
+            })
+
+    # --------------------------------------------------------
+    # SORT MOST MEANINGFUL FACTORS FIRST
+    # --------------------------------------------------------
+
+    factors.sort(
+        key=lambda item:
+            abs(
+                _safe_float(
+                    item.get(
+                        "points",
+                        0,
+                    )
+                )
+            ),
+        reverse=True,
+    )
+
+    # Keep the explanation readable.
+    factors = factors[
+        :8
+    ]
+
+    # --------------------------------------------------------
+    # Determine recommended side
+    # --------------------------------------------------------
+
+    spread_edge_type = disparity.get(
+        "spread_edge_type"
+    )
+
+    if (
+        spread_edge_type
+        ==
+        "lean_home"
+    ):
+
+        recommended_team = (
+            home_team
+        )
+
+    elif (
+        spread_edge_type
+        ==
+        "lean_away"
+    ):
+
+        recommended_team = (
+            away_team
+        )
+
+    else:
+
+        predicted_margin = _safe_float(
+            prediction.get(
+                "predicted_margin",
+                0,
+            )
+        )
+
+        recommended_team = (
+            home_team
+            if predicted_margin >= 0
+            else away_team
+        )
+
+    # --------------------------------------------------------
+    # Summary
+    # --------------------------------------------------------
+
+    team_factor_count = sum(
+        1
+        for factor
+        in factors
+        if factor.get(
+            "team"
+        )
+        ==
+        recommended_team
+    )
+
+    if team_factor_count >= 3:
+
+        summary = (
+            f"Prime Picks favors {recommended_team} because "
+            f"multiple model inputs align on the same side."
+        )
+
+    elif team_factor_count >= 1:
+
+        summary = (
+            f"Prime Picks sees an advantage for "
+            f"{recommended_team} based on the matchup and market data."
+        )
+
+    else:
+
+        summary = (
+            "Prime Picks sees a market/model discrepancy, "
+            "but the supporting factors are mixed."
+        )
+
+    return {
+        "recommended_team":
+            recommended_team,
+
+        "summary":
+            summary,
+
+        "factor_count":
+            len(
+                factors
+            ),
+
+        "factors":
+            factors,
+    }
+
+
+# ============================================================
 # Weekly Card
 # ============================================================
 
@@ -1559,16 +2229,6 @@ async def generate_weekly_card(
     cfb_sp_lookup: dict,
     cfb_team_stats: Optional[dict] = None,
 ) -> dict:
-    """
-    Generate complete weekly Prime Picks slate.
-
-    NFL:
-    - trained NFL model / baseline
-
-    CFB:
-    - complete SP+ -> trained SP+ model
-    - incomplete SP+ -> opponent-adjusted SRS fallback
-    """
 
     league_upper = (
         league.upper()
@@ -1890,7 +2550,7 @@ async def generate_weekly_card(
             )
 
         # ====================================================
-        # 6. Roster / injury / movement adjustments
+        # 6. Adjustments
         # ====================================================
 
         (
@@ -1928,10 +2588,6 @@ async def generate_weekly_card(
 
         else:
 
-            # ------------------------------------------------
-            # Complete SP+
-            # ------------------------------------------------
-
             if features.get(
                 "sp_data_complete",
                 False,
@@ -1948,10 +2604,6 @@ async def generate_weekly_card(
                 )
 
                 cfb_sp_model_games += 1
-
-            # ------------------------------------------------
-            # Missing SP+
-            # ------------------------------------------------
 
             else:
 
@@ -1980,7 +2632,7 @@ async def generate_weekly_card(
                 cfb_fallback_games += 1
 
         # ====================================================
-        # 8. Vegas line
+        # 8. Vegas
         # ====================================================
 
         line = (
@@ -2016,10 +2668,6 @@ async def generate_weekly_card(
             )
         )
 
-        # ====================================================
-        # 8B. Confidence weighting
-        # ====================================================
-
         disparity = (
             apply_prediction_confidence(
                 disparity,
@@ -2029,7 +2677,7 @@ async def generate_weekly_card(
         )
 
         # ====================================================
-        # 9. Injury notes
+        # 9. Injuries
         # ====================================================
 
         home_injury_notes = (
@@ -2177,7 +2825,45 @@ async def generate_weekly_card(
             }
 
         # ====================================================
-        # 12. Build game response
+        # 12. NEW: WHY PRIME PICKS LIKES THIS PLAY
+        # ====================================================
+
+        play_explanation = (
+            build_play_explanation(
+                home_team=
+                    home,
+
+                away_team=
+                    away,
+
+                league=
+                    league_upper,
+
+                neutral_site=
+                    neutral,
+
+                features=
+                    features,
+
+                prediction=
+                    prediction,
+
+                disparity=
+                    disparity,
+
+                adj_summary=
+                    adj_summary,
+
+                prediction_mode=
+                    prediction_mode,
+
+                fallback_diagnostics=
+                    fallback_diagnostics,
+            )
+        )
+
+        # ====================================================
+        # 13. Response
         # ====================================================
 
         card_game = {
@@ -2248,6 +2934,17 @@ async def generate_weekly_card(
                     ],
             },
 
+            # NEW
+            "key_factors":
+                play_explanation.get(
+                    "factors",
+                    [],
+                ),
+
+            # NEW
+            "play_explanation":
+                play_explanation,
+
             "league":
                 league_upper,
 
@@ -2258,19 +2955,11 @@ async def generate_weekly_card(
                 season,
         }
 
-        # ----------------------------------------------------
-        # SRS fallback diagnostics
-        # ----------------------------------------------------
-
         if fallback_diagnostics is not None:
 
             card_game[
                 "fallback_diagnostics"
             ] = fallback_diagnostics
-
-        # ----------------------------------------------------
-        # Explain missing SP+
-        # ----------------------------------------------------
 
         if (
             league_upper == "CFB"
@@ -2331,7 +3020,7 @@ async def generate_weekly_card(
         )
 
     # ========================================================
-    # 13. Ranking
+    # 14. Ranking
     # ========================================================
 
     card_games.sort(
@@ -2348,7 +3037,7 @@ async def generate_weekly_card(
     )
 
     # ========================================================
-    # 14. Coverage
+    # 15. Coverage
     # ========================================================
 
     lines_coverage = sum(
@@ -2421,10 +3110,6 @@ async def generate_weekly_card(
         standard_confidence_games,
         low_confidence_games,
     )
-
-    # ========================================================
-    # Final response
-    # ========================================================
 
     return {
         "league":
