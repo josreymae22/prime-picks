@@ -2521,6 +2521,34 @@ async def generate_weekly_card(
 
             continue
 
+
+        # ====================================================
+        # EARLY LINE FILTER
+        # Only process games that currently have Vegas lines.
+        # This prevents CFB from running the full prediction /
+        # roster / injury / explanation pipeline on hundreds
+        # of irrelevant schedule records.
+        # ====================================================
+
+        line = find_line(
+            lines_lookup,
+            home,
+            away,
+        )
+
+        if line is None:
+
+            unmatched_lines += 1
+
+            logger.debug(
+                "%s game skipped — no Vegas line: %s @ %s",
+                league_upper,
+                away,
+                home,
+            )
+
+            continue
+
         # ====================================================
         # 5. Feature generation
         # ====================================================
@@ -2635,24 +2663,7 @@ async def generate_weekly_card(
         # 8. Vegas
         # ====================================================
 
-        line = (
-            find_line(
-                lines_lookup,
-                home,
-                away,
-            )
-        )
-
-        if line is None:
-
-            unmatched_lines += 1
-
-            logger.debug(
-                "%s line not matched: %s @ %s",
-                league_upper,
-                away,
-                home,
-            )
+       
 
         movement = (
             adj_summary[
