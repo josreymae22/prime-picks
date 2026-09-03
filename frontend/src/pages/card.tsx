@@ -443,6 +443,24 @@ function ExplanationPanel({
   const recommendedTeam =
     game.play_explanation?.recommended_team || null;
 
+  const supportingFactors =
+    recommendedTeam
+      ? factors.filter(
+          factor =>
+            !factor.team ||
+            factor.team === recommendedTeam
+        )
+      : factors;
+
+  const counterFactors =
+    recommendedTeam
+      ? factors.filter(
+          factor =>
+            factor.team &&
+            factor.team !== recommendedTeam
+        )
+      : [];
+
   const factorColor = (impact?: string) => {
     if (impact === 'high') return '#C9A84C';
     if (impact === 'medium') return '#8B9BB4';
@@ -515,16 +533,34 @@ function ExplanationPanel({
       </div>
 
       {game.play_explanation?.summary && (
-        <p
-          className="text-xs mb-4"
-          style={{
-            color: '#A8B5C7',
-            fontFamily: 'var(--font-mono)',
-            lineHeight: 1.65,
-          }}
-        >
-          {game.play_explanation.summary}
-        </p>
+        <div className="mb-4">
+          <p
+            className="text-xs"
+            style={{
+              color: '#A8B5C7',
+              fontFamily: 'var(--font-mono)',
+              lineHeight: 1.65,
+            }}
+          >
+            {game.play_explanation.summary}
+          </p>
+
+          {recommendedTeam && counterFactors.length > 0 && (
+            <p
+              className="text-xs mt-2"
+              style={{
+                color: '#8B9BB4',
+                fontFamily: 'var(--font-mono)',
+                lineHeight: 1.6,
+              }}
+            >
+              Mixed-factor matchup: {supportingFactors.length}{' '}
+              factor{supportingFactors.length === 1 ? '' : 's'} support{' '}
+              {recommendedTeam}, while {counterFactors.length}{' '}
+              factor{counterFactors.length === 1 ? '' : 's'} point the other way.
+            </p>
+          )}
+        </div>
       )}
 
       <div className="space-y-2">
@@ -570,6 +606,26 @@ function ExplanationPanel({
                         }}
                       >
                         {factor.team}
+                      </span>
+                    )}
+
+                    {recommendedTeam && factor.team && (
+                      <span
+                        className="text-xs px-1.5 py-0.5 rounded uppercase"
+                        style={{
+                          color: supportsPick ? '#3DAA6A' : '#D94040',
+                          background: supportsPick
+                            ? 'rgba(61,170,106,0.08)'
+                            : 'rgba(217,64,64,0.08)',
+                          border: supportsPick
+                            ? '1px solid rgba(61,170,106,0.2)'
+                            : '1px solid rgba(217,64,64,0.2)',
+                          fontFamily: 'var(--font-mono)',
+                          fontSize: 9,
+                          letterSpacing: '0.07em',
+                        }}
+                      >
+                        {supportsPick ? '✓ Supports Pick' : '↔ Counter Factor'}
                       </span>
                     )}
 
