@@ -45,7 +45,7 @@ from sqlalchemy import (
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.base import Base  # adjust to your project's declarative base
-from app.services.slate_card import Pick, SlateCard, caption_for
+from slate_card import Pick, SlateCard, caption_for
 
 log = logging.getLogger("prime_picks.social_autopost")
 
