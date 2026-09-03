@@ -32,6 +32,8 @@ Explanation behavior:
 
 import logging
 import math
+import asyncio
+import time
 
 from typing import Optional
 from datetime import datetime
@@ -59,6 +61,125 @@ from line_snapshotter import snapshotter
 
 
 logger = logging.getLogger(__name__)
+
+
+# ============================================================
+# Weekly Card cache
+# ============================================================
+
+CARD_CACHE_TTL_SECONDS = 15 * 60
+CARD_CACHE_STALE_SECONDS = 6 * 60 * 60
+
+_CARD_CACHE: dict[str, dict] = {}
+_CARD_CACHE_LOCKS: dict[str, asyncio.Lock] = {}
+
+
+def _card_cache_key(
+    league: str,
+    week: int,
+    season: Optional[int],
+) -> str:
+    return (
+        f"{league.upper()}|"
+        f"{season if season is not None else 'current'}|"
+        f"{int(week)}"
+    )
+
+
+def _get_cache_lock(
+    key: str,
+) -> asyncio.Lock:
+    lock = _CARD_CACHE_LOCKS.get(key)
+
+    if lock is None:
+        lock = asyncio.Lock()
+        _CARD_CACHE_LOCKS[key] = lock
+
+    return lock
+
+
+def _get_cached_card(
+    key: str,
+    allow_stale: bool = False,
+) -> Optional[dict]:
+    entry = _CARD_CACHE.get(key)
+
+    if not entry:
+        return None
+
+    age = time.monotonic() - entry["stored_at"]
+
+    if age <= CARD_CACHE_TTL_SECONDS:
+        return entry["data"]
+
+    if (
+        allow_stale
+        and
+        age <= CARD_CACHE_STALE_SECONDS
+    ):
+        return entry["data"]
+
+    return None
+
+
+def _store_cached_card(
+    key: str,
+    data: dict,
+) -> None:
+    _CARD_CACHE[key] = {
+        "stored_at": time.monotonic(),
+        "data": data,
+    }
+
+
+def clear_weekly_card_cache(
+    league: Optional[str] = None,
+    week: Optional[int] = None,
+    season: Optional[int] = None,
+) -> int:
+    if (
+        league is None
+        and
+        week is None
+        and
+        season is None
+    ):
+        removed = len(_CARD_CACHE)
+        _CARD_CACHE.clear()
+        return removed
+
+    keys_to_remove = []
+
+    for key in list(_CARD_CACHE.keys()):
+        key_league, key_season, key_week = key.split("|", 2)
+
+        if (
+            league is not None
+            and
+            key_league != league.upper()
+        ):
+            continue
+
+        if (
+            week is not None
+            and
+            key_week != str(int(week))
+        ):
+            continue
+
+        if (
+            season is not None
+            and
+            key_season != str(int(season))
+        ):
+            continue
+
+        keys_to_remove.append(key)
+
+    for key in keys_to_remove:
+        _CARD_CACHE.pop(key, None)
+
+    return len(keys_to_remove)
 
 
 # ============================================================
@@ -2229,6 +2350,155 @@ async def generate_weekly_card(
     cfb_sp_lookup: dict,
     cfb_team_stats: Optional[dict] = None,
 ) -> dict:
+    """
+    Cached public Weekly Card entry point.
+
+    - Fresh cache hit returns immediately.
+    - Only one request generates a given league/week/season card.
+    - Concurrent requests wait for that same generation.
+    - A recent stale card is returned if an upstream refresh fails.
+    """
+
+    league_upper = league.upper()
+
+    cache_key = _card_cache_key(
+        league_upper,
+        week,
+        season,
+    )
+
+    cached = _get_cached_card(
+        cache_key
+    )
+
+    if cached is not None:
+        logger.info(
+            "Weekly Card cache HIT: %s",
+            cache_key,
+        )
+        return cached
+
+    lock = _get_cache_lock(
+        cache_key
+    )
+
+    async with lock:
+        cached = _get_cached_card(
+            cache_key
+        )
+
+        if cached is not None:
+            logger.info(
+                "Weekly Card cache HIT after wait: %s",
+                cache_key,
+            )
+            return cached
+
+        stale = _get_cached_card(
+            cache_key,
+            allow_stale=True,
+        )
+
+        logger.info(
+            "Weekly Card cache MISS: %s — generating...",
+            cache_key,
+        )
+
+        try:
+            result = await _generate_weekly_card_uncached(
+                league=league_upper,
+                week=week,
+                season=season,
+                nfl_team_stats=nfl_team_stats,
+                cfb_sp_lookup=cfb_sp_lookup,
+                cfb_team_stats=cfb_team_stats,
+            )
+
+        except Exception:
+            logger.exception(
+                "Weekly Card generation failed for %s",
+                cache_key,
+            )
+
+            if stale is not None:
+                logger.warning(
+                    "Serving stale Weekly Card after generation error: %s",
+                    cache_key,
+                )
+                return stale
+
+            raise
+
+        raw_games = int(
+            result.get(
+                "raw_schedule_games",
+                0,
+            )
+            or 0
+        )
+
+        line_games = int(
+            result.get(
+                "games_with_lines",
+                0,
+            )
+            or 0
+        )
+
+        total_games = int(
+            result.get(
+                "total_games",
+                0,
+            )
+            or 0
+        )
+
+        upstream_lines_failed = (
+            raw_games > 0
+            and
+            line_games == 0
+            and
+            total_games == 0
+        )
+
+        if upstream_lines_failed:
+            if stale is not None:
+                logger.warning(
+                    "Weekly Card refresh returned no lines; "
+                    "serving stale cache for %s",
+                    cache_key,
+                )
+                return stale
+
+            logger.warning(
+                "Weekly Card generated with zero usable lines "
+                "for %s; result will not be cached.",
+                cache_key,
+            )
+            return result
+
+        _store_cached_card(
+            cache_key,
+            result,
+        )
+
+        logger.info(
+            "Weekly Card cached for %s (%ss TTL)",
+            cache_key,
+            CARD_CACHE_TTL_SECONDS,
+        )
+
+        return result
+
+
+async def _generate_weekly_card_uncached(
+    league: str,
+    week: int,
+    season: Optional[int],
+    nfl_team_stats: dict,
+    cfb_sp_lookup: dict,
+    cfb_team_stats: Optional[dict] = None,
+) -> dict:
 
     league_upper = (
         league.upper()
@@ -2363,22 +2633,14 @@ async def generate_weekly_card(
     )
 
     # ========================================================
-    # 3. Fresh movement snapshot
+    # 3. Movement snapshot data
     # ========================================================
-
-    try:
-
-        await snapshotter.take_snapshot(
-            league_upper
-        )
-
-    except Exception as exc:
-
-        logger.warning(
-            "%s fresh snapshot failed: %s",
-            league_upper,
-            exc,
-        )
+    #
+    # Do not pull a fresh snapshot on every Weekly Card load.
+    # The snapshot scheduler/history should refresh movement
+    # data separately. This removes a duplicate Odds API call
+    # from the page-load path.
+    #
 
     # ========================================================
     # 4. Build card
