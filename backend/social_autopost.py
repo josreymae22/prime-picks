@@ -11,6 +11,12 @@ published before its own game has started.
 Each window produces one rendered slate card image, which is posted to all
 three platforms with platform-appropriate captions.
 
+IMPORTANT SOCIAL RULE:
+- Only Strong Edge games are eligible.
+- Only games whose kickoff date is TODAY in America/New_York are eligible.
+- Eligible games are sorted chronologically by kickoff.
+- Future-day Strong Edges are ignored until that day becomes today.
+
 Env vars:
     X_API_KEY, X_API_SECRET, X_ACCESS_TOKEN, X_ACCESS_TOKEN_SECRET
     GRAPH_VERSION, FB_PAGE_ID, FB_PAGE_TOKEN, IG_USER_ID
@@ -28,6 +34,7 @@ import os
 import random
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from enum import Enum
 from typing import Iterable, Optional, Sequence
 
@@ -60,6 +67,13 @@ MAX_PER_TICK = 6
 STAGGER_SECONDS = (4, 9)
 MAX_ATTEMPTS = 3
 GRACE_MINUTES = 180
+
+# Jay's requested publishing day is based on US Eastern time.
+SOCIAL_TIME_ZONE = os.getenv(
+    "SOCIAL_TIME_ZONE",
+    "America/New_York",
+)
+SOCIAL_TZ = ZoneInfo(SOCIAL_TIME_ZONE)
 
 ENABLED = os.getenv("SOCIAL_AUTOPOST_ENABLED", "false").lower() == "true"
 DRY_RUN = os.getenv("SOCIAL_AUTOPOST_DRY_RUN", "true").lower() == "true"
@@ -115,6 +129,18 @@ class Game:
     commence_time: datetime      # scheduled kickoff, UTC
     pick: Pick
 
+    # Recommendation metadata from Weekly Card.
+    # strong_edge can be supplied directly by the caller. If it is None,
+    # edge_label is used as the source of truth.
+    edge_label: str = ""
+    strong_edge: Optional[bool] = None
+
+    # Kept here for logging/future social rules.
+    confidence: str = ""
+    prediction_mode: str = ""
+    sharp_signal: float = 0.0
+    steam_move: bool = False
+
 
 @dataclass
 class Window:
@@ -128,6 +154,67 @@ class Window:
     @property
     def picks(self) -> list[Pick]:
         return [g.pick for g in self.games]
+
+
+def _as_utc(value: datetime) -> datetime:
+    """Normalize a datetime to timezone-aware UTC."""
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _social_local_date(value: datetime):
+    """Return the kickoff date in the configured social-media timezone."""
+    return _as_utc(value).astimezone(SOCIAL_TZ).date()
+
+
+def _today_social_date():
+    """Today's date in the configured social-media timezone."""
+    return _utcnow().astimezone(SOCIAL_TZ).date()
+
+
+def is_game_today(game: Game) -> bool:
+    """True only when the game's kickoff falls on today's ET calendar date."""
+    return _social_local_date(game.commence_time) == _today_social_date()
+
+
+def is_strong_edge_game(game: Game) -> bool:
+    """
+    Jay's social rule: only Strong Edge games are eligible.
+
+    Prefer an explicit boolean supplied by the Weekly Card integration.
+    Otherwise fall back to the backend edge label.
+    """
+    if game.strong_edge is not None:
+        return bool(game.strong_edge)
+
+    label = (game.edge_label or "").strip().lower()
+    return "strong edge" in label
+
+
+def filter_social_games_for_today(
+    games: Sequence[Game],
+) -> list[Game]:
+    """
+    Keep only today's Strong Edge games and return them chronologically.
+
+    Tomorrow/Saturday/etc. remain eligible only when that calendar day
+    actually becomes "today" in America/New_York.
+    """
+    selected = [
+        game
+        for game in games
+        if is_game_today(game)
+        and is_strong_edge_game(game)
+    ]
+
+    selected.sort(
+        key=lambda game: _as_utc(
+            game.commence_time
+        )
+    )
+
+    return selected
 
 
 def group_into_windows(
@@ -156,9 +243,9 @@ def group_into_windows(
     return windows
 
 
-def label_window(window: Window, index: int, total: int, tz_offset_hours: int = -4):
-    """Human label for the card header. Uses local kickoff hour."""
-    local_hour = (window.start + timedelta(hours=tz_offset_hours)).hour
+def label_window(window: Window, index: int, total: int):
+    """Human label for the card header. Uses Eastern kickoff hour."""
+    local_hour = _as_utc(window.start).astimezone(SOCIAL_TZ).hour
     if total == 1:
         return "Full slate"
     if local_hour < 15:
@@ -214,15 +301,40 @@ async def schedule_slate_posts(
     record_label: Optional[str] = None,
     platforms: Optional[Sequence[str]] = None,
 ) -> list[ScheduledPost]:
-    """Idempotent across regenerations. One row per (window, platform)."""
+    """
+    Idempotent across regenerations. One row per (window, platform).
+
+    Social eligibility is intentionally stricter than Weekly Card:
+    only Strong Edge games whose kickoff date is TODAY in Eastern Time
+    are allowed into the social slate.
+    """
     platforms = list(platforms or PLATFORMS)
-    windows = group_into_windows(games)
+
+    eligible_games = filter_social_games_for_today(
+        games
+    )
+
+    if not eligible_games:
+        log.info(
+            "no social posts scheduled for %s %s: "
+            "0 Strong Edge games playing today (%s)",
+            sport,
+            week_label,
+            SOCIAL_TIME_ZONE,
+        )
+        return []
+
+    windows = group_into_windows(
+        eligible_games
+    )
     created: list[ScheduledPost] = []
 
     for i, window in enumerate(windows):
         key = slate_key(sport, week_label, window)
         label = label_window(window, i, len(windows))
-        local_date = (window.start + timedelta(hours=-4)).strftime("%a, %b %-d")
+        local_date = _as_utc(window.start).astimezone(SOCIAL_TZ).strftime(
+            "%a, %b %d"
+        ).replace(" 0", " ")
 
         card = SlateCard(
             sport=sport,
@@ -269,8 +381,14 @@ async def schedule_slate_posts(
 
     await session.commit()
     log.info(
-        "scheduled %s windows x %s platforms for %s %s",
-        len(windows), len(platforms), sport, week_label,
+        "scheduled %s windows x %s platforms for %s %s "
+        "(%s Strong Edge games playing today in %s)",
+        len(windows),
+        len(platforms),
+        sport,
+        week_label,
+        len(eligible_games),
+        SOCIAL_TIME_ZONE,
     )
     return created
 
