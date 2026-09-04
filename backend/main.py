@@ -1861,10 +1861,16 @@ async def initialize_prime_picks():
 async def initialize_social_autopost():
     """
     Initialize the social-post database and start the background poller.
-
-    This runs as a background task so Render can bind the web service
-    immediately instead of waiting for PostgreSQL setup during startup.
     """
+
+    print(
+        "🔵 ENTERED initialize_social_autopost()",
+        flush=True,
+    )
+
+    logger.info(
+        "Entered initialize_social_autopost()."
+    )
 
     try:
 
@@ -1872,10 +1878,29 @@ async def initialize_social_autopost():
             "Initializing social autopost database..."
         )
 
+        print(
+            "🔵 INITIALIZING SOCIAL AUTOPOST DATABASE",
+            flush=True,
+        )
+
         await init_db()
 
         logger.info(
             "Social autopost database ready."
+        )
+
+        print(
+            "✅ SOCIAL AUTOPOST DATABASE READY",
+            flush=True,
+        )
+
+        logger.info(
+            "Starting social autopost poller..."
+        )
+
+        print(
+            "🔵 STARTING SOCIAL AUTOPOST POLLER",
+            flush=True,
         )
 
         await run_poller(
@@ -1898,6 +1923,10 @@ async def initialize_social_autopost():
             exc_info=True,
         )
 
+        print(
+            f"❌ SOCIAL AUTOPOST ERROR: {type(exc).__name__}: {exc}",
+            flush=True,
+        )
 
 # ============================================================
 # Application lifecycle
@@ -1930,17 +1959,93 @@ async def lifespan(
         "initialization_task"
     ] = initialization_task
 
-    # Start social database + poller in the background.
-    # This intentionally does not block Render startup.
-    autopost_task = (
-        asyncio.create_task(
-            initialize_social_autopost()
-        )
-    )
+   # ============================================================
+# Start social autopost background task
+# ============================================================
 
-    app_state[
-        "autopost_task"
-    ] = autopost_task
+logger.info(
+    "🚀 Starting social autopost background task..."
+)
+
+print(
+    "🚀 SOCIAL AUTOPOST TASK CREATION STARTED",
+    flush=True,
+)
+
+autopost_task = asyncio.create_task(
+    initialize_social_autopost(),
+    name="prime-picks-social-autopost",
+)
+
+
+def _autopost_done_callback(
+    task: asyncio.Task,
+):
+    try:
+
+        if task.cancelled():
+
+            logger.warning(
+                "Social autopost task was cancelled."
+            )
+
+            print(
+                "⚠️ SOCIAL AUTOPOST TASK CANCELLED",
+                flush=True,
+            )
+
+            return
+
+        exc = task.exception()
+
+        if exc:
+
+            logger.error(
+                "❌ Social autopost task crashed: %s",
+                exc,
+                exc_info=exc,
+            )
+
+            print(
+                f"❌ SOCIAL AUTOPOST TASK CRASHED: {exc}",
+                flush=True,
+            )
+
+        else:
+
+            logger.warning(
+                "Social autopost task exited unexpectedly."
+            )
+
+            print(
+                "⚠️ SOCIAL AUTOPOST TASK EXITED",
+                flush=True,
+            )
+
+    except Exception as callback_exc:
+
+        logger.exception(
+            "Error checking social autopost task: %s",
+            callback_exc,
+        )
+
+
+autopost_task.add_done_callback(
+    _autopost_done_callback
+)
+
+app_state[
+    "autopost_task"
+] = autopost_task
+
+logger.info(
+    "✅ Social autopost task created."
+)
+
+print(
+    "✅ SOCIAL AUTOPOST TASK CREATED",
+    flush=True,
+)
 
     # Let Render see the port immediately.
     yield
