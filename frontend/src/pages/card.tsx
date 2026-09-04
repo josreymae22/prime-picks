@@ -15,6 +15,12 @@ const API =
 const CURRENT_SEASON = new Date().getFullYear();
 
 
+type DateFilter =
+  'today' |
+  'tomorrow' |
+  'all_dates';
+
+
 const EDGE_COLORS: Record<string, string> = {
   fade_away: '#D94040',
   fade_home: '#D94040',
@@ -275,6 +281,35 @@ function getRelativeDayLabel(
 
   return null;
 }
+
+
+function getGameDateBucket(
+  value?: string
+): DateFilter | 'other' {
+  if (!value) {
+    return 'other';
+  }
+
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    return 'other';
+  }
+
+  const relative =
+    getRelativeDayLabel(date);
+
+  if (relative === 'TODAY') {
+    return 'today';
+  }
+
+  if (relative === 'TOMORROW') {
+    return 'tomorrow';
+  }
+
+  return 'other';
+}
+
 
 function formatKickoff(
   value?: string
@@ -908,6 +943,13 @@ export default function CardPage() {
   >('all');
 
   const [
+    dateFilter,
+    setDateFilter,
+  ] = useState<DateFilter>(
+    'all_dates'
+  );
+
+  const [
     expandedGame,
     setExpandedGame,
   ] =
@@ -1106,6 +1148,21 @@ export default function CardPage() {
           d.edge_score ??
           0;
 
+        const dateBucket =
+          getGameDateBucket(
+            game.date
+          );
+
+        const matchesDate =
+          dateFilter ===
+            'all_dates' ||
+          dateBucket ===
+            dateFilter;
+
+        if (!matchesDate) {
+          return false;
+        }
+
         if (
           filter === 'edges'
         ) {
@@ -1295,6 +1352,10 @@ export default function CardPage() {
                           setExpandedGame(
                             null
                           );
+
+                          setDateFilter(
+                            'all_dates'
+                          );
                         }}
 
                         className="score-display px-4 py-2 rounded"
@@ -1376,6 +1437,10 @@ export default function CardPage() {
 
                       setError(
                         ''
+                      );
+
+                      setDateFilter(
+                        'all_dates'
                       );
                     }
                   }
@@ -1628,67 +1693,130 @@ export default function CardPage() {
                 </div>
 
 
-                <div className="flex gap-2">
+                <div className="flex flex-col gap-2 items-end">
 
-                  {(
-                    [
-                      'all',
-                      'edges',
-                      'sharp',
-                    ] as const
-                  ).map(
-                    f => (
-                      <button
-                        key={f}
+                  <div className="flex gap-2 flex-wrap justify-end">
+                    {(
+                      [
+                        'today',
+                        'tomorrow',
+                        'all_dates',
+                      ] as const
+                    ).map(
+                      f => (
+                        <button
+                          key={f}
 
-                        onClick={() =>
-                          setFilter(
-                            f
-                          )
-                        }
+                          onClick={() =>
+                            setDateFilter(
+                              f
+                            )
+                          }
 
-                        className="score-display px-3 py-1 rounded text-xs"
+                          className="score-display px-3 py-1 rounded text-xs"
 
-                        style={{
-                          fontSize:
-                            11,
+                          style={{
+                            fontSize:
+                              11,
 
-                          letterSpacing:
-                            '0.08em',
+                            letterSpacing:
+                              '0.08em',
 
-                          background:
-                            filter === f
-                              ? '#C9A84C'
-                              : 'rgba(15,44,71,0.5)',
+                            background:
+                              dateFilter === f
+                                ? '#3DAA6A'
+                                : 'rgba(15,44,71,0.5)',
 
-                          color:
-                            filter === f
-                              ? '#030B14'
-                              : '#8B9BB4',
+                            color:
+                              dateFilter === f
+                                ? '#030B14'
+                                : '#8B9BB4',
 
-                          border:
-                            '1px solid',
+                            border:
+                              '1px solid',
 
-                          borderColor:
-                            filter === f
-                              ? '#C9A84C'
-                              : 'rgba(201,168,76,0.15)',
+                            borderColor:
+                              dateFilter === f
+                                ? '#3DAA6A'
+                                : 'rgba(61,170,106,0.18)',
 
-                          cursor:
-                            'pointer',
-                        }}
-                      >
+                            cursor:
+                              'pointer',
+                          }}
+                        >
+                          {f === 'today'
+                            ? 'TODAY'
+                            : f === 'tomorrow'
+                              ? 'TOMORROW'
+                              : 'ALL DATES'}
+                        </button>
+                      )
+                    )}
+                  </div>
 
-                        {f === 'all'
-                          ? 'ALL'
-                          : f ===
-                              'edges'
-                            ? '⚡ EDGES'
-                            : '🔥 SHARP'}
+                  <div className="flex gap-2 flex-wrap justify-end">
 
-                      </button>
-                    )
-                  )}
+                    {(
+                      [
+                        'all',
+                        'edges',
+                        'sharp',
+                      ] as const
+                    ).map(
+                      f => (
+                        <button
+                          key={f}
+
+                          onClick={() =>
+                            setFilter(
+                              f
+                            )
+                          }
+
+                          className="score-display px-3 py-1 rounded text-xs"
+
+                          style={{
+                            fontSize:
+                              11,
+
+                            letterSpacing:
+                              '0.08em',
+
+                            background:
+                              filter === f
+                                ? '#C9A84C'
+                                : 'rgba(15,44,71,0.5)',
+
+                            color:
+                              filter === f
+                                ? '#030B14'
+                                : '#8B9BB4',
+
+                            border:
+                              '1px solid',
+
+                            borderColor:
+                              filter === f
+                                ? '#C9A84C'
+                                : 'rgba(201,168,76,0.15)',
+
+                            cursor:
+                              'pointer',
+                          }}
+                        >
+
+                          {f === 'all'
+                            ? 'ALL'
+                            : f ===
+                                'edges'
+                              ? '⚡ EDGES'
+                              : '🔥 SHARP'}
+
+                        </button>
+                      )
+                    )}
+
+                  </div>
 
                 </div>
 
@@ -1710,18 +1838,36 @@ export default function CardPage() {
                         'var(--font-mono)',
                     }}
                   >
-                    {filter ===
-                    'edges'
-                      ? 'No significant edges this week.'
-                      : filter ===
-                          'sharp'
-                        ? 'No sharp movement detected yet.'
-                        : `No ${
-                            league ===
-                            'CFB'
-                              ? 'NCAAF'
-                              : league
-                          } games found for Week ${week}, ${CURRENT_SEASON}.`}
+                    {dateFilter === 'today' && filter === 'edges'
+                      ? 'No strong/significant edge games are playing today.'
+                      : dateFilter === 'tomorrow' && filter === 'edges'
+                        ? 'No strong/significant edge games are playing tomorrow.'
+                        : dateFilter === 'today' && filter === 'sharp'
+                          ? 'No sharp movement detected for games playing today.'
+                          : dateFilter === 'tomorrow' && filter === 'sharp'
+                            ? 'No sharp movement detected for games playing tomorrow.'
+                            : dateFilter === 'today'
+                              ? `No ${
+                                  league === 'CFB'
+                                    ? 'NCAAF'
+                                    : league
+                                } games are playing today in this loaded week.`
+                              : dateFilter === 'tomorrow'
+                                ? `No ${
+                                    league === 'CFB'
+                                      ? 'NCAAF'
+                                      : league
+                                  } games are playing tomorrow in this loaded week.`
+                                : filter === 'edges'
+                                  ? 'No significant edges this week.'
+                                  : filter === 'sharp'
+                                    ? 'No sharp movement detected yet.'
+                                    : `No ${
+                                        league ===
+                                        'CFB'
+                                          ? 'NCAAF'
+                                          : league
+                                      } games found for Week ${week}, ${CURRENT_SEASON}.`}
                   </p>
 
                 </div>
@@ -2992,9 +3138,9 @@ export default function CardPage() {
               >
                 Strong Edge and Sharp plays are
                 prioritized first, then shown in
-                chronological kickoff order · Game
-                dates and times shown in Eastern Time ·
-                Injuries and market movement included
+                chronological kickoff order · Use TODAY
+                or TOMORROW to isolate the daily slate ·
+                Dates and times shown in Eastern Time
               </p>
 
             </div>
