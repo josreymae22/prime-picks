@@ -36,6 +36,7 @@ import logging
 import math
 import os
 
+from datetime import datetime, timezone
 from contextlib import asynccontextmanager
 from typing import Optional
 
@@ -75,7 +76,12 @@ from injury_engine import injury_engine
 from line_snapshotter import snapshotter
 from card_engine import generate_weekly_card
 from database import AsyncSessionLocal, init_db
-from social_autopost import run_poller
+from social_autopost import (
+    Game as SocialGame,
+    run_poller,
+    schedule_slate_posts,
+)
+from slate_card import Pick
 
 
 # ============================================================
@@ -3029,6 +3035,307 @@ def _cfb_key_factors(
 
 
 # ============================================================
+# Weekly Card -> Social Auto-Post bridge
+# ============================================================
+
+def _parse_social_kickoff(
+    value,
+) -> Optional[datetime]:
+    if isinstance(value, datetime):
+        dt = value
+    else:
+        raw = str(value or "").strip()
+        if not raw:
+            return None
+        try:
+            dt = datetime.fromisoformat(
+                raw.replace("Z", "+00:00")
+            )
+        except ValueError:
+            logger.warning(
+                "Social queue skipped invalid kickoff: %r",
+                value,
+            )
+            return None
+
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+
+    return dt.astimezone(timezone.utc)
+
+
+def _format_social_line(
+    value: float,
+) -> str:
+    rounded = round(float(value), 1)
+
+    if rounded == 0:
+        return "PK"
+
+    number = (
+        f"{rounded:.1f}"
+        .rstrip("0")
+        .rstrip(".")
+    )
+
+    if rounded > 0:
+        return f"+{number}"
+
+    return number
+
+
+def _social_pick_from_card_game(
+    game: dict,
+) -> Optional[Pick]:
+    disparity = (
+        game.get("disparity", {})
+        or {}
+    )
+
+    edge_label = (
+        disparity.get("edge_label", "")
+        or ""
+    ).lower()
+
+    if "strong edge" not in edge_label:
+        return None
+
+    home = (
+        game.get("home_team", "")
+        or ""
+    )
+    away = (
+        game.get("away_team", "")
+        or ""
+    )
+
+    if not home or not away:
+        return None
+
+    spread_type = disparity.get(
+        "spread_edge_type"
+    )
+    total_type = disparity.get(
+        "total_edge_type"
+    )
+    vegas_spread = disparity.get(
+        "vegas_spread"
+    )
+    vegas_total = disparity.get(
+        "vegas_total"
+    )
+    spread_disparity = disparity.get(
+        "spread_disparity"
+    )
+    total_disparity = disparity.get(
+        "total_disparity"
+    )
+
+    try:
+        spread_strength = (
+            abs(float(spread_disparity or 0.0))
+            * 3.0
+        )
+    except (TypeError, ValueError):
+        spread_strength = 0.0
+
+    try:
+        total_strength = (
+            abs(float(total_disparity or 0.0))
+            * 1.5
+        )
+    except (TypeError, ValueError):
+        total_strength = 0.0
+
+    spread_pick_available = (
+        spread_type
+        in ("lean_home", "lean_away")
+        and vegas_spread is not None
+    )
+
+    total_pick_available = (
+        total_type
+        in ("lean_over", "lean_under")
+        and vegas_total is not None
+    )
+
+    selection = None
+
+    if (
+        spread_pick_available
+        and (
+            spread_strength >= total_strength
+            or not total_pick_available
+        )
+    ):
+        try:
+            home_spread = float(vegas_spread)
+        except (TypeError, ValueError):
+            return None
+
+        if spread_type == "lean_home":
+            selection = (
+                f"{home} "
+                f"{_format_social_line(home_spread)}"
+            )
+        else:
+            selection = (
+                f"{away} "
+                f"{_format_social_line(-home_spread)}"
+            )
+
+    elif total_pick_available:
+        try:
+            total_number = float(vegas_total)
+        except (TypeError, ValueError):
+            return None
+
+        total_text = (
+            f"{total_number:.1f}"
+            .rstrip("0")
+            .rstrip(".")
+        )
+
+        if total_type == "lean_over":
+            selection = f"Over {total_text}"
+        else:
+            selection = f"Under {total_text}"
+
+    if not selection:
+        logger.info(
+            "Strong Edge social game skipped because no actionable "
+            "spread/total selection was available: %s @ %s",
+            away,
+            home,
+        )
+        return None
+
+    return Pick(
+        away=away,
+        home=home,
+        selection=selection,
+        price=-110,
+        units=1.0,
+    )
+
+
+def _social_games_from_weekly_card(
+    card: dict,
+) -> list[SocialGame]:
+    social_games: list[SocialGame] = []
+
+    for game in (
+        card.get("games", [])
+        or []
+    ):
+        disparity = (
+            game.get("disparity", {})
+            or {}
+        )
+
+        edge_label = (
+            disparity.get("edge_label", "")
+            or ""
+        )
+
+        if "strong edge" not in edge_label.lower():
+            continue
+
+        kickoff = _parse_social_kickoff(
+            game.get("date")
+        )
+
+        if kickoff is None:
+            continue
+
+        pick = _social_pick_from_card_game(
+            game
+        )
+
+        if pick is None:
+            continue
+
+        game_id = str(
+            game.get("game_id")
+            or (
+                f"{game.get('away_team', '')}"
+                f"-{game.get('home_team', '')}"
+                f"-{game.get('date', '')}"
+            )
+        )
+
+        social_games.append(
+            SocialGame(
+                game_id=game_id,
+                commence_time=kickoff,
+                pick=pick,
+                edge_label=edge_label,
+                strong_edge=True,
+                confidence=(
+                    game.get("confidence", "")
+                    or ""
+                ),
+                prediction_mode=(
+                    game.get("prediction_mode", "")
+                    or ""
+                ),
+                sharp_signal=float(
+                    disparity.get("sharp_signal", 0.0)
+                    or 0.0
+                ),
+                steam_move=bool(
+                    disparity.get("steam_move", False)
+                ),
+            )
+        )
+
+    return social_games
+
+
+async def _schedule_social_from_weekly_card(
+    card: dict,
+) -> int:
+    social_games = (
+        _social_games_from_weekly_card(card)
+    )
+
+    if not social_games:
+        logger.info(
+            "Weekly Card produced no Strong Edge games eligible "
+            "for social queue conversion."
+        )
+        return 0
+
+    sport = (
+        card.get("league", "")
+        or ""
+    ).upper()
+
+    week = int(
+        card.get("week", 1)
+        or 1
+    )
+
+    async with AsyncSessionLocal() as session:
+        rows = await schedule_slate_posts(
+            session,
+            sport=sport,
+            week_label=f"Week {week}",
+            games=social_games,
+        )
+
+    logger.info(
+        "Weekly Card -> social queue complete: %s row(s) returned "
+        "for %s Week %s.",
+        len(rows),
+        sport,
+        week,
+    )
+
+    return len(rows)
+
+
+# ============================================================
 # Weekly Card
 # ============================================================
 
@@ -3065,7 +3372,7 @@ async def weekly_card(
 
     try:
 
-        return (
+        card = (
             await generate_weekly_card(
                 league=
                     league.upper(),
@@ -3092,6 +3399,19 @@ async def weekly_card(
                     ],
             )
         )
+
+        try:
+            await _schedule_social_from_weekly_card(
+                card
+            )
+
+        except Exception as social_exc:
+            logger.exception(
+                "Weekly Card social scheduling failed (non-fatal): %s",
+                social_exc,
+            )
+
+        return card
 
     except Exception as exc:
 
