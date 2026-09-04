@@ -74,6 +74,8 @@ from player_events import ingest_player_moves, get_data_source_status
 from injury_engine import injury_engine
 from line_snapshotter import snapshotter
 from card_engine import generate_weekly_card
+from database import AsyncSessionLocal, init_db
+from social_autopost import run_poller
 
 
 # ============================================================
@@ -106,6 +108,7 @@ app_state = {
 
     "initialization_task": None,
     "snapshot_task": None,
+    "autopost_task": None,
 }
 
 
@@ -1850,6 +1853,52 @@ async def initialize_prime_picks():
         ] = False
 
 
+
+# ============================================================
+# Social auto-post background service
+# ============================================================
+
+async def initialize_social_autopost():
+    """
+    Initialize the social-post database and start the background poller.
+
+    This runs as a background task so Render can bind the web service
+    immediately instead of waiting for PostgreSQL setup during startup.
+    """
+
+    try:
+
+        logger.info(
+            "Initializing social autopost database..."
+        )
+
+        await init_db()
+
+        logger.info(
+            "Social autopost database ready."
+        )
+
+        await run_poller(
+            AsyncSessionLocal
+        )
+
+    except asyncio.CancelledError:
+
+        logger.info(
+            "Social autopost task cancelled."
+        )
+
+        raise
+
+    except Exception as exc:
+
+        logger.error(
+            "Social autopost startup/runtime error: %s",
+            exc,
+            exc_info=True,
+        )
+
+
 # ============================================================
 # Application lifecycle
 # ============================================================
@@ -1880,6 +1929,18 @@ async def lifespan(
     app_state[
         "initialization_task"
     ] = initialization_task
+
+    # Start social database + poller in the background.
+    # This intentionally does not block Render startup.
+    autopost_task = (
+        asyncio.create_task(
+            initialize_social_autopost()
+        )
+    )
+
+    app_state[
+        "autopost_task"
+    ] = autopost_task
 
     # Let Render see the port immediately.
     yield
@@ -1921,6 +1982,31 @@ async def lifespan(
 
             logger.warning(
                 "Snapshot scheduler shutdown error: %s",
+                exc,
+            )
+
+    autopost_task = (
+        app_state.get(
+            "autopost_task"
+        )
+    )
+
+    if autopost_task:
+
+        autopost_task.cancel()
+
+        try:
+
+            await autopost_task
+
+        except asyncio.CancelledError:
+
+            pass
+
+        except Exception as exc:
+
+            logger.warning(
+                "Social autopost shutdown error: %s",
                 exc,
             )
 
