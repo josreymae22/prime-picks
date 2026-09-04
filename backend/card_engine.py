@@ -304,16 +304,24 @@ def _weekly_card_sort_key(
     game: dict,
 ) -> tuple:
     """
-    Weekly Card display priority:
+    Weekly Card default display order:
 
-    1. Strong Edge / qualified Sharp or Steam
-    2. Moderate Edge
-    3. Slight Lean
-    4. Low-confidence / SRS fallback
-    5. Neutral / unrated
+    1. Earliest kickoff date/time first.
+       This guarantees today's games appear before tomorrow's games,
+       and tomorrow's games appear before later dates.
 
-    Inside each priority tier, games are sorted by kickoff time
-    from earliest to latest. Ranking score only breaks exact-time ties.
+    2. If multiple games have the exact same kickoff time, use the
+       recommendation tier as the tie-breaker:
+       - Strong Edge / qualified Sharp or Steam
+       - Moderate Edge
+       - Slight Lean
+       - Low-confidence / SRS fallback
+       - Neutral / unrated
+
+    3. Ranking score breaks any remaining exact-time/tier ties.
+
+    This preserves all existing edge/sharp filters while making the
+    initial Weekly Card load chronological.
     """
 
     disparity = (
@@ -428,27 +436,27 @@ def _weekly_card_sort_key(
             is_sharp
         )
     ):
-        priority = 0
+        recommendation_priority = 0
 
     elif (
         not is_fallback
         and
         is_moderate
     ):
-        priority = 1
+        recommendation_priority = 1
 
     elif (
         not is_fallback
         and
         is_slight
     ):
-        priority = 2
+        recommendation_priority = 2
 
     elif is_fallback:
-        priority = 3
+        recommendation_priority = 3
 
     else:
-        priority = 4
+        recommendation_priority = 4
 
     kickoff = _parse_game_datetime(
         game.get(
@@ -458,8 +466,8 @@ def _weekly_card_sort_key(
     )
 
     return (
-        priority,
         kickoff,
+        recommendation_priority,
         -ranking_score,
     )
 
@@ -3508,8 +3516,13 @@ async def _generate_weekly_card_uncached(
         )
 
     # ========================================================
-    # 14. Recommendation priority + chronological ordering
+    # 14. Chronological ordering
     # ========================================================
+    #
+    # Default card load is earliest kickoff first so today's games
+    # always appear above tomorrow/later games. Recommendation tier
+    # only breaks ties when kickoff times are identical.
+    #
 
     card_games.sort(
         key=_weekly_card_sort_key
