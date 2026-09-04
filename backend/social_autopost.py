@@ -33,7 +33,7 @@ import logging
 import os
 import random
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from enum import Enum
 from typing import Iterable, Optional, Sequence
@@ -80,6 +80,19 @@ DRY_RUN = os.getenv("SOCIAL_AUTOPOST_DRY_RUN", "true").lower() == "true"
 PLATFORMS = [
     p.strip() for p in os.getenv("SOCIAL_PLATFORMS", "x").split(",") if p.strip()
 ]
+
+SOCIAL_TEST_DATE = os.getenv(
+    "SOCIAL_TEST_DATE",
+    "",
+).strip()
+
+SOCIAL_TEST_FORCE_DUE = (
+    os.getenv(
+        "SOCIAL_TEST_FORCE_DUE",
+        "false",
+    ).lower()
+    == "true"
+)
 
 
 def _utcnow() -> datetime:
@@ -149,7 +162,16 @@ class Window:
 
     @property
     def post_at(self) -> datetime:
-        return self.start + timedelta(minutes=POST_DELAY_MINUTES)
+        if (
+            DRY_RUN
+            and
+            SOCIAL_TEST_FORCE_DUE
+        ):
+            return _utcnow()
+
+        return self.start + timedelta(
+            minutes=POST_DELAY_MINUTES
+        )
 
     @property
     def picks(self) -> list[Pick]:
@@ -169,8 +191,28 @@ def _social_local_date(value: datetime):
 
 
 def _today_social_date():
-    """Today's date in the configured social-media timezone."""
-    return _utcnow().astimezone(SOCIAL_TZ).date()
+    """
+    Today's date in the configured social-media timezone.
+
+    During DRY RUN only, SOCIAL_TEST_DATE can override the calendar date
+    so tomorrow's slate can be tested safely before it becomes live.
+    """
+    if DRY_RUN and SOCIAL_TEST_DATE:
+        try:
+            return date.fromisoformat(
+                SOCIAL_TEST_DATE
+            )
+        except ValueError:
+            log.warning(
+                "invalid SOCIAL_TEST_DATE=%r; expected YYYY-MM-DD; "
+                "using real %s date instead",
+                SOCIAL_TEST_DATE,
+                SOCIAL_TIME_ZONE,
+            )
+
+    return _utcnow().astimezone(
+        SOCIAL_TZ
+    ).date()
 
 
 def is_game_today(game: Game) -> bool:
@@ -381,14 +423,24 @@ async def schedule_slate_posts(
 
     await session.commit()
     log.info(
-        "scheduled %s windows x %s platforms for %s %s "
-        "(%s Strong Edge games playing today in %s)",
+        (
+            "scheduled %s windows x %s platforms for %s %s "
+            "(%s Strong Edge games on effective social date %s in %s; "
+            "dry_run=%s, force_due=%s)"
+        ),
         len(windows),
         len(platforms),
         sport,
         week_label,
         len(eligible_games),
+        _today_social_date(),
         SOCIAL_TIME_ZONE,
+        DRY_RUN,
+        (
+            SOCIAL_TEST_FORCE_DUE
+            if DRY_RUN
+            else False
+        ),
     )
     return created
 
@@ -584,8 +636,28 @@ async def run_poller(session_factory) -> None:
         log.info("social autopost disabled; poller not started")
         return
 
-    log.info("social autopost poller started (dry_run=%s, platforms=%s)",
-             DRY_RUN, PLATFORMS)
+    log.info(
+        (
+            "social autopost poller started "
+            "(dry_run=%s, platforms=%s, test_date=%s, force_due=%s)"
+        ),
+        DRY_RUN,
+        PLATFORMS,
+        (
+            SOCIAL_TEST_DATE
+            if (
+                DRY_RUN
+                and
+                SOCIAL_TEST_DATE
+            )
+            else None
+        ),
+        (
+            SOCIAL_TEST_FORCE_DUE
+            if DRY_RUN
+            else False
+        ),
+    )
     while True:
         try:
             async with session_factory() as session:
