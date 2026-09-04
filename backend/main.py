@@ -36,8 +36,9 @@ import logging
 import math
 import os
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from contextlib import asynccontextmanager
+from zoneinfo import ZoneInfo
 from typing import Optional
 
 import numpy as np
@@ -3295,11 +3296,152 @@ def _social_games_from_weekly_card(
 async def _schedule_social_from_weekly_card(
     card: dict,
 ) -> int:
+    """
+    Convert the finalized Weekly Card into social queue rows and emit
+    diagnostics showing exactly how many Strong Edge games fall on
+    today/tomorrow/later dates in the configured social timezone.
+    """
+
+    card_games = (
+        card.get(
+            "games",
+            [],
+        )
+        or []
+    )
+
+    social_zone_name = os.getenv(
+        "SOCIAL_TIME_ZONE",
+        "America/New_York",
+    )
+
+    social_zone = ZoneInfo(
+        social_zone_name
+    )
+
+    social_today = (
+        datetime.now(
+            timezone.utc
+        )
+        .astimezone(
+            social_zone
+        )
+        .date()
+    )
+
+    social_tomorrow = (
+        social_today
+        +
+        timedelta(
+            days=1
+        )
+    )
+
+    strong_edge_count = 0
+    strong_edge_today = 0
+    strong_edge_tomorrow = 0
+    strong_edge_later = 0
+    strong_edge_invalid_date = 0
+
+    for game in card_games:
+
+        disparity = (
+            game.get(
+                "disparity",
+                {},
+            )
+            or {}
+        )
+
+        edge_label = (
+            disparity.get(
+                "edge_label",
+                "",
+            )
+            or ""
+        ).strip().lower()
+
+        if (
+            "strong edge"
+            not in edge_label
+        ):
+            continue
+
+        strong_edge_count += 1
+
+        kickoff = (
+            _parse_social_kickoff(
+                game.get(
+                    "date"
+                )
+            )
+        )
+
+        if kickoff is None:
+
+            strong_edge_invalid_date += 1
+            continue
+
+        local_date = (
+            kickoff
+            .astimezone(
+                social_zone
+            )
+            .date()
+        )
+
+        if (
+            local_date
+            ==
+            social_today
+        ):
+
+            strong_edge_today += 1
+
+        elif (
+            local_date
+            ==
+            social_tomorrow
+        ):
+
+            strong_edge_tomorrow += 1
+
+        else:
+
+            strong_edge_later += 1
+
+    logger.info(
+        (
+            "Social bridge diagnostics: "
+            "card_games=%s, "
+            "strong_edges=%s, "
+            "strong_edge_today=%s, "
+            "strong_edge_tomorrow=%s, "
+            "strong_edge_later=%s, "
+            "strong_edge_invalid_date=%s, "
+            "social_date=%s, "
+            "timezone=%s"
+        ),
+        len(
+            card_games
+        ),
+        strong_edge_count,
+        strong_edge_today,
+        strong_edge_tomorrow,
+        strong_edge_later,
+        strong_edge_invalid_date,
+        social_today,
+        social_zone_name,
+    )
+
     social_games = (
-        _social_games_from_weekly_card(card)
+        _social_games_from_weekly_card(
+            card
+        )
     )
 
     if not social_games:
+
         logger.info(
             "Weekly Card produced no Strong Edge games eligible "
             "for social queue conversion."
@@ -3307,32 +3449,47 @@ async def _schedule_social_from_weekly_card(
         return 0
 
     sport = (
-        card.get("league", "")
+        card.get(
+            "league",
+            "",
+        )
         or ""
     ).upper()
 
     week = int(
-        card.get("week", 1)
+        card.get(
+            "week",
+            1,
+        )
         or 1
     )
 
     async with AsyncSessionLocal() as session:
-        rows = await schedule_slate_posts(
-            session,
-            sport=sport,
-            week_label=f"Week {week}",
-            games=social_games,
+
+        rows = (
+            await schedule_slate_posts(
+                session,
+                sport=sport,
+                week_label=
+                    f"Week {week}",
+                games=
+                    social_games,
+            )
         )
 
     logger.info(
         "Weekly Card -> social queue complete: %s row(s) returned "
         "for %s Week %s.",
-        len(rows),
+        len(
+            rows
+        ),
         sport,
         week,
     )
 
-    return len(rows)
+    return len(
+        rows
+    )
 
 
 # ============================================================
