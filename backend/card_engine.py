@@ -36,7 +36,7 @@ import asyncio
 import time
 
 from typing import Optional
-from datetime import datetime
+from datetime import datetime, timezone
 
 from data_fetcher import (
     get_nfl_schedule_upcoming,
@@ -247,6 +247,221 @@ def _safe_float(
         ValueError,
     ):
         return default
+
+
+def _parse_game_datetime(
+    value: str,
+) -> datetime:
+    """
+    Convert a schedule ISO date into a timezone-aware UTC datetime.
+
+    Games with missing or invalid dates are sorted to the end.
+    """
+
+    if not value:
+        return datetime.max.replace(
+            tzinfo=timezone.utc
+        )
+
+    try:
+        normalized = (
+            str(value)
+            .strip()
+            .replace(
+                "Z",
+                "+00:00",
+            )
+        )
+
+        parsed = datetime.fromisoformat(
+            normalized
+        )
+
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(
+                tzinfo=timezone.utc
+            )
+
+        return parsed.astimezone(
+            timezone.utc
+        )
+
+    except (
+        TypeError,
+        ValueError,
+    ):
+        logger.warning(
+            "Could not parse game date: %s",
+            value,
+        )
+
+        return datetime.max.replace(
+            tzinfo=timezone.utc
+        )
+
+
+def _weekly_card_sort_key(
+    game: dict,
+) -> tuple:
+    """
+    Weekly Card display priority:
+
+    1. Strong Edge / qualified Sharp or Steam
+    2. Moderate Edge
+    3. Slight Lean
+    4. Low-confidence / SRS fallback
+    5. Neutral / unrated
+
+    Inside each priority tier, games are sorted by kickoff time
+    from earliest to latest. Ranking score only breaks exact-time ties.
+    """
+
+    disparity = (
+        game.get(
+            "disparity",
+            {},
+        )
+        or {}
+    )
+
+    edge_label = (
+        disparity.get(
+            "edge_label",
+            "",
+        )
+        or ""
+    ).lower()
+
+    confidence = (
+        game.get(
+            "confidence",
+            "",
+        )
+        or ""
+    ).lower()
+
+    prediction_mode = (
+        game.get(
+            "prediction_mode",
+            "",
+        )
+        or ""
+    ).lower()
+
+    ranking_score = _safe_float(
+        disparity.get(
+            "ranking_score",
+            disparity.get(
+                "edge_score",
+                0,
+            ),
+        ),
+        0.0,
+    )
+
+    sharp_signal = _safe_float(
+        disparity.get(
+            "sharp_signal",
+            0,
+        ),
+        0.0,
+    )
+
+    sharp_aligned = bool(
+        disparity.get(
+            "sharp_aligned",
+            False,
+        )
+    )
+
+    steam_move = bool(
+        disparity.get(
+            "steam_move",
+            False,
+        )
+    )
+
+    is_fallback = (
+        confidence == "low"
+        or
+        prediction_mode in (
+            "opponent_adjusted_fallback",
+            "historical_fallback",
+        )
+        or
+        "fallback" in edge_label
+        or
+        "srs" in edge_label
+    )
+
+    is_strong = (
+        "strong edge"
+        in edge_label
+    )
+
+    is_sharp = (
+        steam_move
+        or
+        (
+            sharp_aligned
+            and
+            sharp_signal >= 0.40
+        )
+    )
+
+    is_moderate = (
+        "moderate edge"
+        in edge_label
+    )
+
+    is_slight = (
+        "slight lean"
+        in edge_label
+    )
+
+    if (
+        not is_fallback
+        and
+        (
+            is_strong
+            or
+            is_sharp
+        )
+    ):
+        priority = 0
+
+    elif (
+        not is_fallback
+        and
+        is_moderate
+    ):
+        priority = 1
+
+    elif (
+        not is_fallback
+        and
+        is_slight
+    ):
+        priority = 2
+
+    elif is_fallback:
+        priority = 3
+
+    else:
+        priority = 4
+
+    kickoff = _parse_game_datetime(
+        game.get(
+            "date",
+            "",
+        )
+    )
+
+    return (
+        priority,
+        kickoff,
+        -ranking_score,
+    )
 
 
 # ============================================================
@@ -3293,20 +3508,11 @@ async def _generate_weekly_card_uncached(
         )
 
     # ========================================================
-    # 14. Ranking
+    # 14. Recommendation priority + chronological ordering
     # ========================================================
 
     card_games.sort(
-        key=lambda game:
-            (
-                game[
-                    "disparity"
-                ].get(
-                    "ranking_score"
-                )
-                or 0
-            ),
-        reverse=True,
+        key=_weekly_card_sort_key
     )
 
     # ========================================================
