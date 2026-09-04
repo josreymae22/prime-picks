@@ -11,7 +11,9 @@ from sqlalchemy.orm import DeclarativeBase
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 if not DATABASE_URL:
-    raise RuntimeError("DATABASE_URL environment variable is not configured.")
+    raise RuntimeError(
+        "DATABASE_URL environment variable is not configured."
+    )
 
 
 # Render may provide postgres:// or postgresql://.
@@ -22,12 +24,17 @@ if DATABASE_URL.startswith("postgres://"):
         "postgresql+asyncpg://",
         1,
     )
+
 elif DATABASE_URL.startswith("postgresql://"):
     DATABASE_URL = DATABASE_URL.replace(
         "postgresql://",
         "postgresql+asyncpg://",
         1,
     )
+
+
+class Base(DeclarativeBase):
+    pass
 
 
 engine = create_async_engine(
@@ -43,13 +50,25 @@ AsyncSessionLocal = async_sessionmaker(
 )
 
 
-class Base(DeclarativeBase):
-    pass
-
-
 async def get_db():
     async with AsyncSessionLocal() as session:
         try:
             yield session
         finally:
             await session.close()
+
+
+async def init_db():
+    """
+    Create database tables required by the social autopost system.
+
+    Importing social_autopost here registers ScheduledPost on Base.metadata
+    before SQLAlchemy runs create_all().
+    """
+
+    import social_autopost  # noqa: F401
+
+    async with engine.begin() as conn:
+        await conn.run_sync(
+            Base.metadata.create_all
+        )
