@@ -300,28 +300,113 @@ def _parse_game_datetime(
         )
 
 
+def _is_completed_or_stale_game(
+    game: dict,
+) -> bool:
+    """
+    Return True when a schedule record represents a completed game,
+    or when its kickoff is far enough in the past that it should no
+    longer appear on the Weekly Card.
+
+    The explicit completion/status fields are preferred. The time
+    fallback protects us when an upstream schedule provider leaves a
+    completed game in an "upcoming" response.
+    """
+
+    # Common boolean completion fields.
+    for key in (
+        "completed",
+        "complete",
+        "isCompleted",
+        "is_completed",
+    ):
+        if game.get(key) is True:
+            return True
+
+    # Common status/state fields used by schedule providers.
+    status_values = []
+
+    for key in (
+        "status",
+        "state",
+        "gameStatus",
+        "game_status",
+        "statusType",
+        "status_type",
+    ):
+        value = game.get(key)
+
+        if value is not None:
+            status_values.append(
+                str(value).strip().lower()
+            )
+
+    completed_statuses = {
+        "final",
+        "completed",
+        "complete",
+        "closed",
+        "post",
+        "postgame",
+        "finished",
+    }
+
+    for value in status_values:
+        if (
+            value in completed_statuses
+            or
+            "final" in value
+            or
+            "complete" in value
+            or
+            "closed" in value
+        ):
+            return True
+
+    # Time fallback:
+    # keep currently-live/recently-started games, but hide anything
+    # whose scheduled kickoff was more than six hours ago.
+    game_date = (
+        game.get("startDate")
+        or game.get("start_date")
+        or game.get("date")
+        or ""
+    )
+
+    kickoff = _parse_game_datetime(
+        game_date
+    )
+
+    if kickoff == datetime.max.replace(
+        tzinfo=timezone.utc
+    ):
+        return False
+
+    now_utc = datetime.now(
+        timezone.utc
+    )
+
+    hours_since_kickoff = (
+        now_utc - kickoff
+    ).total_seconds() / 3600.0
+
+    return hours_since_kickoff > 6.0
+
+
 def _weekly_card_sort_key(
     game: dict,
 ) -> tuple:
     """
-    Weekly Card default display order:
+    Weekly Card display priority:
 
-    1. Earliest kickoff date/time first.
-       This guarantees today's games appear before tomorrow's games,
-       and tomorrow's games appear before later dates.
+    1. Strong Edge / qualified Sharp or Steam
+    2. Moderate Edge
+    3. Slight Lean
+    4. Low-confidence / SRS fallback
+    5. Neutral / unrated
 
-    2. If multiple games have the exact same kickoff time, use the
-       recommendation tier as the tie-breaker:
-       - Strong Edge / qualified Sharp or Steam
-       - Moderate Edge
-       - Slight Lean
-       - Low-confidence / SRS fallback
-       - Neutral / unrated
-
-    3. Ranking score breaks any remaining exact-time/tier ties.
-
-    This preserves all existing edge/sharp filters while making the
-    initial Weekly Card load chronological.
+    Inside each priority tier, games are sorted by kickoff time
+    from earliest to latest. Ranking score only breaks exact-time ties.
     """
 
     disparity = (
@@ -436,27 +521,27 @@ def _weekly_card_sort_key(
             is_sharp
         )
     ):
-        recommendation_priority = 0
+        priority = 0
 
     elif (
         not is_fallback
         and
         is_moderate
     ):
-        recommendation_priority = 1
+        priority = 1
 
     elif (
         not is_fallback
         and
         is_slight
     ):
-        recommendation_priority = 2
+        priority = 2
 
     elif is_fallback:
-        recommendation_priority = 3
+        priority = 3
 
     else:
-        recommendation_priority = 4
+        priority = 4
 
     kickoff = _parse_game_datetime(
         game.get(
@@ -466,8 +551,8 @@ def _weekly_card_sort_key(
     )
 
     return (
+        priority,
         kickoff,
-        recommendation_priority,
         -ranking_score,
     )
 
@@ -2872,12 +2957,35 @@ async def _generate_weekly_card_uncached(
     card_games = []
 
     skipped_games = 0
+    completed_games_hidden = 0
     unmatched_lines = 0
 
     cfb_sp_model_games = 0
     cfb_fallback_games = 0
 
     for game in games:
+
+        # ----------------------------------------------------
+        # Hide completed / stale games
+        # ----------------------------------------------------
+        #
+        # Some upstream schedule responses can still include games
+        # that have already finished. These should never appear on
+        # the Weekly Card, even when ALL DATES is selected.
+        #
+
+        if _is_completed_or_stale_game(
+            game
+        ):
+            completed_games_hidden += 1
+
+            logger.debug(
+                "%s game hidden — completed/stale. game=%s",
+                league_upper,
+                game,
+            )
+
+            continue
 
         # ----------------------------------------------------
         # Normalize game fields
@@ -3516,13 +3624,8 @@ async def _generate_weekly_card_uncached(
         )
 
     # ========================================================
-    # 14. Chronological ordering
+    # 14. Recommendation priority + chronological ordering
     # ========================================================
-    #
-    # Default card load is earliest kickoff first so today's games
-    # always appear above tomorrow/later games. Recommendation tier
-    # only breaks ties when kickoff times are identical.
-    #
 
     card_games.sort(
         key=_weekly_card_sort_key
@@ -3579,6 +3682,7 @@ async def _generate_weekly_card_uncached(
             "%s lines, "
             "%s movement, "
             "%s skipped, "
+            "%s completed/stale hidden, "
             "%s unmatched lines, "
             "%s SP+ model, "
             "%s opponent-adjusted fallback, "
@@ -3596,6 +3700,7 @@ async def _generate_weekly_card_uncached(
         lines_coverage,
         games_with_movement,
         skipped_games,
+        completed_games_hidden,
         unmatched_lines,
         cfb_sp_model_games,
         cfb_fallback_games,
@@ -3623,6 +3728,9 @@ async def _generate_weekly_card_uncached(
 
         "skipped_schedule_games":
             skipped_games,
+
+        "completed_games_hidden":
+            completed_games_hidden,
 
         "unmatched_lines":
             unmatched_lines,
