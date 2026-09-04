@@ -202,6 +202,153 @@ type CardData = {
 };
 
 
+const DISPLAY_TIME_ZONE = 'America/New_York';
+
+function getDatePartsInTimeZone(
+  date: Date,
+  timeZone: string
+) {
+  const parts = new Intl.DateTimeFormat(
+    'en-US',
+    {
+      timeZone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }
+  ).formatToParts(date);
+
+  const get = (type: string) =>
+    parts.find(part => part.type === type)?.value || '';
+
+  return {
+    year: get('year'),
+    month: get('month'),
+    day: get('day'),
+  };
+}
+
+function getRelativeDayLabel(
+  gameDate: Date
+) {
+  const now = new Date();
+
+  const todayParts =
+    getDatePartsInTimeZone(
+      now,
+      DISPLAY_TIME_ZONE
+    );
+
+  const gameParts =
+    getDatePartsInTimeZone(
+      gameDate,
+      DISPLAY_TIME_ZONE
+    );
+
+  const todayKey =
+    `${todayParts.year}-${todayParts.month}-${todayParts.day}`;
+
+  const gameKey =
+    `${gameParts.year}-${gameParts.month}-${gameParts.day}`;
+
+  if (gameKey === todayKey) {
+    return 'TODAY';
+  }
+
+  const tomorrow = new Date(
+    now.getTime() +
+    24 * 60 * 60 * 1000
+  );
+
+  const tomorrowParts =
+    getDatePartsInTimeZone(
+      tomorrow,
+      DISPLAY_TIME_ZONE
+    );
+
+  const tomorrowKey =
+    `${tomorrowParts.year}-${tomorrowParts.month}-${tomorrowParts.day}`;
+
+  if (gameKey === tomorrowKey) {
+    return 'TOMORROW';
+  }
+
+  return null;
+}
+
+function formatKickoff(
+  value?: string
+) {
+  if (!value) {
+    return {
+      relative: null as string | null,
+      dateLabel: 'DATE TBD',
+      timeLabel: 'TIME TBD',
+    };
+  }
+
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    return {
+      relative: null as string | null,
+      dateLabel: 'DATE TBD',
+      timeLabel: 'TIME TBD',
+    };
+  }
+
+  const relative =
+    getRelativeDayLabel(date);
+
+  const dateLabel =
+    new Intl.DateTimeFormat(
+      'en-US',
+      {
+        timeZone:
+          DISPLAY_TIME_ZONE,
+
+        weekday:
+          'short',
+
+        month:
+          'short',
+
+        day:
+          'numeric',
+      }
+    )
+      .format(date)
+      .toUpperCase();
+
+  const timeLabel =
+    new Intl.DateTimeFormat(
+      'en-US',
+      {
+        timeZone:
+          DISPLAY_TIME_ZONE,
+
+        hour:
+          'numeric',
+
+        minute:
+          '2-digit',
+
+        hour12:
+          true,
+      }
+    )
+      .format(date)
+      .toUpperCase();
+
+  return {
+    relative,
+    dateLabel,
+    timeLabel:
+      `${timeLabel} ET`,
+  };
+}
+
+
 function MovementBadge({
   mv,
 }: {
@@ -1652,6 +1799,11 @@ export default function CardPage() {
                       d.low_confidence ===
                         true;
 
+                    const kickoff =
+                      formatKickoff(
+                        game.date
+                      );
+
 
                     return (
                       <div
@@ -1853,6 +2005,83 @@ export default function CardPage() {
                                   </span>
                                 )}
 
+                              </div>
+
+
+                              <div
+                                className="mb-3 flex items-center gap-2 flex-wrap"
+                                style={{
+                                  fontFamily:
+                                    'var(--font-mono)',
+                                }}
+                              >
+                                {kickoff.relative && (
+                                  <span
+                                    className="text-xs px-2 py-1 rounded"
+                                    style={{
+                                      background:
+                                        kickoff.relative === 'TODAY'
+                                          ? 'rgba(61,170,106,0.1)'
+                                          : 'rgba(201,168,76,0.08)',
+
+                                      color:
+                                        kickoff.relative === 'TODAY'
+                                          ? '#3DAA6A'
+                                          : '#C9A84C',
+
+                                      border:
+                                        kickoff.relative === 'TODAY'
+                                          ? '1px solid rgba(61,170,106,0.24)'
+                                          : '1px solid rgba(201,168,76,0.2)',
+
+                                      fontWeight:
+                                        700,
+
+                                      letterSpacing:
+                                        '0.08em',
+                                    }}
+                                  >
+                                    {kickoff.relative}
+                                  </span>
+                                )}
+
+                                <span
+                                  className="text-xs"
+                                  style={{
+                                    color:
+                                      '#F0EEE6',
+
+                                    fontWeight:
+                                      600,
+                                  }}
+                                >
+                                  {kickoff.dateLabel}
+                                </span>
+
+                                <span
+                                  className="text-xs"
+                                  style={{
+                                    color:
+                                      '#C9A84C',
+
+                                    fontWeight:
+                                      700,
+                                  }}
+                                >
+                                  • {kickoff.timeLabel}
+                                </span>
+
+                                {game.venue && (
+                                  <span
+                                    className="text-xs"
+                                    style={{
+                                      color:
+                                        '#596A80',
+                                    }}
+                                  >
+                                    • {game.venue}
+                                  </span>
+                                )}
                               </div>
 
 
@@ -2761,11 +2990,11 @@ export default function CardPage() {
                     'var(--font-mono)',
                 }}
               >
-                Games ranked by Prime Picks
-                confidence-adjusted edge vs
-                Vegas line · Steam/sharp moves
-                highlighted · Injuries cascaded
-                through depth chart
+                Strong Edge and Sharp plays are
+                prioritized first, then shown in
+                chronological kickoff order · Game
+                dates and times shown in Eastern Time ·
+                Injuries and market movement included
               </p>
 
             </div>
