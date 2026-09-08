@@ -3779,6 +3779,171 @@ async def sync_roster_moves(
 # ============================================================
 # Injury Routes
 # ============================================================
+
+@app.get("/debug/nfl-depth-chart-qb/{team_id}")
+async def debug_nfl_depth_chart_qb(team_id: str):
+    """
+    TEMPORARY READ-ONLY DEBUG ENDPOINT.
+
+    Returns the raw QB depth-chart position from ESPN so we can
+    determine whether athlete array order represents depth order.
+
+    Does NOT:
+    - read Firestore
+    - write Firestore
+    - modify impact scores
+    - affect predictions
+    """
+
+    import httpx
+
+    url = (
+        "https://site.api.espn.com/apis/site/v2/sports/"
+        f"football/nfl/teams/{team_id}/depthcharts"
+    )
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.get(url)
+
+        if response.status_code != 200:
+            return {
+                "success": False,
+                "team_id": team_id,
+                "status_code": response.status_code,
+                "url": url,
+                "body": response.text[:1000],
+            }
+
+        data = response.json()
+
+        matches = []
+
+        for formation_index, formation in enumerate(
+            data.get("depthchart", []) or []
+        ):
+            if not isinstance(formation, dict):
+                continue
+
+            formation_name = (
+                formation.get("name")
+                or formation.get("displayName")
+                or formation.get("id")
+                or "unknown"
+            )
+
+            positions = formation.get("positions", {}) or {}
+
+            if not isinstance(positions, dict):
+                continue
+
+            for position_key, position_data in positions.items():
+                if not isinstance(position_data, dict):
+                    continue
+
+                position_info = position_data.get("position", {}) or {}
+
+                abbreviation = str(
+                    position_info.get("abbreviation")
+                    or position_key
+                    or ""
+                ).upper()
+
+                position_name = str(
+                    position_info.get("displayName")
+                    or position_info.get("name")
+                    or position_key
+                    or ""
+                )
+
+                is_qb = (
+                    abbreviation == "QB"
+                    or str(position_key).lower() == "qb"
+                    or "quarterback" in position_name.lower()
+                )
+
+                if not is_qb:
+                    continue
+
+                raw_athletes = position_data.get("athletes", []) or []
+
+                simplified_athletes = []
+
+                for array_index, entry in enumerate(raw_athletes):
+                    if not isinstance(entry, dict):
+                        continue
+
+                    # ESPN may return the athlete directly OR wrapped
+                    # inside {"athlete": {...}}.
+                    wrapped = entry.get("athlete")
+
+                    if isinstance(wrapped, dict):
+                        athlete = wrapped
+                        wrapper_type = "wrapped"
+                    else:
+                        athlete = entry
+                        wrapper_type = "direct"
+
+                    simplified_athletes.append({
+                        "array_index": array_index,
+                        "array_position": array_index + 1,
+                        "wrapper_type": wrapper_type,
+
+                        "id": athlete.get("id"),
+
+                        "name": (
+                            athlete.get("displayName")
+                            or athlete.get("fullName")
+                            or athlete.get("shortName")
+                        ),
+
+                        "entry_rank": entry.get("rank"),
+                        "entry_slot": entry.get("slot"),
+
+                        "athlete_rank": athlete.get("rank"),
+                        "athlete_slot": athlete.get("slot"),
+
+                        "entry_keys": list(entry.keys()),
+                        "athlete_keys": list(athlete.keys()),
+
+                        "raw_entry": entry,
+                    })
+
+                matches.append({
+                    "formation_index": formation_index,
+                    "formation": formation_name,
+                    "position_key": position_key,
+                    "position_name": position_name,
+                    "abbreviation": abbreviation,
+                    "athlete_count": len(raw_athletes),
+                    "athletes": simplified_athletes,
+                    "raw_position": position_data,
+                })
+
+        return {
+            "success": True,
+            "team_id": team_id,
+            "team": data.get("team", {}),
+            "qb_position_matches": len(matches),
+            "qb_positions": matches,
+
+            "diagnostic_only": True,
+            "firestore_write": False,
+            "prediction_effect": False,
+        }
+
+    except Exception as exc:
+        logger.exception(
+            "ESPN QB depth-chart debug failed for team %s.",
+            team_id,
+        )
+
+        return {
+            "success": False,
+            "team_id": team_id,
+            "url": url,
+            "error": str(exc),
+        }
 @app.get("/debug/nfl-depth-chart/{team_id}")
 async def debug_nfl_depth_chart(team_id: str):
     """
