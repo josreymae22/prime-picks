@@ -3779,6 +3779,190 @@ async def sync_roster_moves(
 # ============================================================
 # Injury Routes
 # ============================================================
+@app.get("/debug/nfl-depth-chart/{team_id}")
+async def debug_nfl_depth_chart(team_id: str):
+    """
+    Read-only ESPN NFL depth-chart inspection.
+
+    Does NOT:
+    - write to Firestore
+    - modify roster players
+    - modify impact scores
+    - affect predictions
+    """
+
+    import httpx
+
+    url = (
+        "https://site.api.espn.com/apis/site/v2/sports/"
+        f"football/nfl/teams/{team_id}/depthcharts"
+    )
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        response = await client.get(url)
+
+    if response.status_code != 200:
+        return {
+            "success": False,
+            "team_id": team_id,
+            "status_code": response.status_code,
+            "url": url,
+            "message": response.text[:500],
+        }
+
+    data = response.json()
+
+    # athlete_id -> best/lowest depth rank found
+    athlete_ranks = {}
+
+    position_results = []
+
+    for item in data.get("items", []):
+        position_groups = item.get("positions", {})
+
+        if not isinstance(position_groups, dict):
+            continue
+
+        for position_key, position_data in position_groups.items():
+
+            if not isinstance(position_data, dict):
+                continue
+
+            position_info = position_data.get("position", {}) or {}
+
+            position_name = (
+                position_info.get("displayName")
+                or position_info.get("name")
+                or position_key
+            )
+
+            position_abbreviation = (
+                position_info.get("abbreviation")
+                or position_key
+            )
+
+            athletes = position_data.get("athletes", []) or []
+
+            parsed_players = []
+
+            for entry in athletes:
+
+                athlete = entry.get("athlete", {}) or {}
+                athlete_ref = athlete.get("$ref", "")
+
+                rank = entry.get("rank")
+
+                try:
+                    rank = int(rank)
+                except (TypeError, ValueError):
+                    rank = None
+
+                # Example:
+                # .../athletes/3918298?lang=en...
+                athlete_id = None
+
+                if "/athletes/" in athlete_ref:
+                    athlete_id = (
+                        athlete_ref
+                        .split("/athletes/", 1)[1]
+                        .split("?", 1)[0]
+                        .split("/", 1)[0]
+                    )
+
+                if not athlete_id:
+                    continue
+
+                # Keep the LOWEST rank if athlete appears more than once.
+                if rank is not None:
+
+                    previous_rank = athlete_ranks.get(athlete_id)
+
+                    if (
+                        previous_rank is None
+                        or rank < previous_rank
+                    ):
+                        athlete_ranks[athlete_id] = rank
+
+                parsed_players.append({
+                    "athlete_id": athlete_id,
+                    "rank": rank,
+                    "athlete_ref": athlete_ref,
+                })
+
+            if parsed_players:
+                position_results.append({
+                    "position_key": position_key,
+                    "position": position_name,
+                    "abbreviation": position_abbreviation,
+                    "players": parsed_players,
+                })
+
+    # ---------------------------------------------------------
+    # Proposed scoring only.
+    #
+    # IMPORTANT:
+    # These values are NOT written anywhere.
+    # ---------------------------------------------------------
+
+    proposed_scores = []
+
+    for athlete_id, rank in athlete_ranks.items():
+
+        if rank == 1:
+            role = "starter"
+            proposed_impact_score = 65.0
+
+        else:
+            role = "backup"
+            proposed_impact_score = 40.0
+
+        proposed_scores.append({
+            "athlete_id": athlete_id,
+            "depth_rank": rank,
+            "role": role,
+            "proposed_impact_score": proposed_impact_score,
+        })
+
+    proposed_scores.sort(
+        key=lambda player: (
+            player["depth_rank"]
+            if player["depth_rank"] is not None
+            else 999,
+            player["athlete_id"],
+        )
+    )
+
+    return {
+        "success": True,
+        "team_id": team_id,
+
+        "summary": {
+            "positions_found": len(position_results),
+            "unique_athletes": len(athlete_ranks),
+            "starters": sum(
+                1
+                for rank in athlete_ranks.values()
+                if rank == 1
+            ),
+            "backups": sum(
+                1
+                for rank in athlete_ranks.values()
+                if rank > 1
+            ),
+        },
+
+        "proposed_scoring": {
+            "starter": 65.0,
+            "backup": 40.0,
+            "firestore_write": False,
+            "prediction_effect": False,
+        },
+
+        "players": proposed_scores,
+
+        "positions": position_results,
+    }
+
 @app.get("/debug/raw-nfl-depth-chart")
 async def debug_raw_nfl_depth_chart():
     """
