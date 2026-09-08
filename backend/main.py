@@ -3784,15 +3784,12 @@ async def debug_nfl_depth_chart(team_id: str):
     """
     TEMPORARY READ-ONLY ESPN DEPTH-CHART PARSER.
 
-    Parses ESPN's actual depthchart[] -> positions{} -> athletes[]
-    structure and produces proposed starter/backup impact scores.
+    Handles both ESPN depth-chart athlete shapes:
+    1. Direct athlete object inside athletes[]
+    2. Wrapped athlete object under entry["athlete"]
 
-    Does NOT:
-    - read Firestore
-    - write Firestore
-    - modify roster players
-    - modify impact scores
-    - affect predictions
+    Keeps the lowest rank seen when a player appears in multiple
+    formations. Does not read/write Firestore or affect predictions.
     """
 
     import httpx
@@ -3816,17 +3813,15 @@ async def debug_nfl_depth_chart(team_id: str):
             }
 
         data = response.json()
+        depthchart = data.get("depthchart", []) or []
 
         athlete_map = {}
         position_results = []
 
-        for formation in (
-            data.get(
-                "depthchart",
-                [],
-            )
-            or []
-        ):
+        for formation in depthchart:
+            if not isinstance(formation, dict):
+                continue
+
             formation_name = (
                 formation.get("name")
                 or formation.get("displayName")
@@ -3834,14 +3829,7 @@ async def debug_nfl_depth_chart(team_id: str):
                 or "unknown"
             )
 
-            positions = (
-                formation.get(
-                    "positions",
-                    {},
-                )
-                or {}
-            )
-
+            positions = formation.get("positions", {}) or {}
             if not isinstance(positions, dict):
                 continue
 
@@ -3849,13 +3837,7 @@ async def debug_nfl_depth_chart(team_id: str):
                 if not isinstance(position_data, dict):
                     continue
 
-                position_info = (
-                    position_data.get(
-                        "position",
-                        {},
-                    )
-                    or {}
-                )
+                position_info = position_data.get("position", {}) or {}
 
                 position_name = (
                     position_info.get("displayName")
@@ -3868,13 +3850,9 @@ async def debug_nfl_depth_chart(team_id: str):
                     or position_key
                 )
 
-                athletes = (
-                    position_data.get(
-                        "athletes",
-                        [],
-                    )
-                    or []
-                )
+                athletes = position_data.get("athletes", []) or []
+                if not isinstance(athletes, list):
+                    continue
 
                 parsed_players = []
 
@@ -3882,26 +3860,33 @@ async def debug_nfl_depth_chart(team_id: str):
                     if not isinstance(entry, dict):
                         continue
 
-                    athlete = (
-                        entry.get(
-                            "athlete",
-                            {},
-                        )
-                        or {}
-                    )
+                    wrapped = entry.get("athlete")
+                    athlete = wrapped if isinstance(wrapped, dict) else entry
 
                     athlete_id = str(
-                        athlete.get(
-                            "id",
-                            "",
-                        )
+                        athlete.get("id", "")
                         or ""
                     ).strip()
+
+                    athlete_ref = str(
+                        athlete.get("$ref", "")
+                        or ""
+                    ).strip()
+
+                    if not athlete_id and "/athletes/" in athlete_ref:
+                        athlete_id = (
+                            athlete_ref
+                            .split("/athletes/", 1)[1]
+                            .split("?", 1)[0]
+                            .split("/", 1)[0]
+                        )
 
                     if not athlete_id:
                         continue
 
                     rank = entry.get("rank")
+                    if rank is None:
+                        rank = athlete.get("rank")
 
                     try:
                         rank = int(rank)
@@ -3909,6 +3894,8 @@ async def debug_nfl_depth_chart(team_id: str):
                         rank = None
 
                     slot = entry.get("slot")
+                    if slot is None:
+                        slot = athlete.get("slot")
 
                     try:
                         slot = int(slot)
@@ -4020,9 +4007,7 @@ async def debug_nfl_depth_chart(team_id: str):
             "season": data.get("season", {}),
             "status": data.get("status"),
             "summary": {
-                "formations_found": len(
-                    data.get("depthchart", []) or []
-                ),
+                "formations_found": len(depthchart),
                 "position_entries_found": len(position_results),
                 "unique_athletes": len(proposed_scores),
                 "starters": len(starters),
