@@ -96,9 +96,6 @@ MOVES_COLLECTION = (
 
 # ============================================================
 # Position groups
-#
-# These weights already power the team's roster_adjustment.
-# They now also power explanation-level point contributions.
 # ============================================================
 
 POSITION_GROUPS = {
@@ -468,8 +465,6 @@ class RosterEngine:
             )
         )
 
-
-        # Exact Firestore document ID
         if (
             self
             ._player_ref(
@@ -483,8 +478,6 @@ class RosterEngine:
                 player_id_or_name
             )
 
-
-        # Slug document ID
         if (
             self
             ._player_ref(
@@ -496,8 +489,6 @@ class RosterEngine:
 
             return slug
 
-
-        # Name search
         docs = (
             db
             .collection(
@@ -528,12 +519,15 @@ class RosterEngine:
                     doc.id
                 )
 
-
         return None
 
 
     # ========================================================
     # Add / Update Player
+    #
+    # recalculate=False is used during bulk ESPN sync.
+    # ensure_team=False avoids checking the same team document
+    # once for every player during a bulk import.
     # ========================================================
 
     def add_or_update_player(
@@ -545,6 +539,8 @@ class RosterEngine:
         impact_score: float,
         league: str,
         notes: str = "",
+        recalculate: bool = True,
+        ensure_team: bool = True,
     ) -> dict:
 
         if not player_id:
@@ -555,13 +551,11 @@ class RosterEngine:
                 )
             )
 
-
         position_group = (
             position_group
             .upper()
             .strip()
         )
-
 
         if (
             position_group
@@ -572,12 +566,12 @@ class RosterEngine:
                 f"Unsupported position group: {position_group}"
             )
 
+        if ensure_team:
 
-        self.init_team(
-            team,
-            league,
-        )
-
+            self.init_team(
+                team,
+                league,
+            )
 
         player = {
 
@@ -608,92 +602,35 @@ class RosterEngine:
                 _now_iso(),
         }
 
-
         self._player_ref(
             player_id
         ).set(
             player
         )
 
-
-        team_doc = (
-            self
-            ._team_ref(
-                team
-            )
-            .get()
-            .to_dict()
-            or {}
-        )
-
-
-        groups = (
-            team_doc.get(
-                "groups",
-                {
-                    group_name: {
-                        "rating":
-                            50.0,
-
-                        "players":
-                            [],
-                    }
-                    for group_name
-                    in POSITION_GROUPS
-                },
-            )
-        )
-
-
-        if (
-            position_group
-            in groups
-        ):
-
-            players = (
-                groups[
-                    position_group
-                ]
-                .get(
-                    "players",
-                    [],
-                )
-            )
-
-
-            if (
-                player_id
-                not in players
-            ):
-
-                players.append(
-                    player_id
-                )
-
-
-            groups[
-                position_group
-            ][
-                "players"
-            ] = players
-
+        # ----------------------------------------------------
+        # Add player to position group without reading and
+        # rewriting the entire team document.
+        # ----------------------------------------------------
 
         self._team_ref(
             team
         ).update({
 
-            "groups":
-                groups,
+            f"groups.{position_group}.players":
+                firestore.ArrayUnion([
+                    player_id
+                ]),
 
             "updated_at":
                 _now_iso(),
         })
 
+        if recalculate:
 
-        self._recalculate_team_adjustment(
-            team
-        )
-
+            self._recalculate_team_adjustment(
+                team
+            )
 
         return player
 
@@ -716,13 +653,11 @@ class RosterEngine:
             )
         )
 
-
         if not real_player_key:
 
             raise ValueError(
                 f"Player {player_id} not found"
             )
-
 
         player_ref = (
             self._player_ref(
@@ -730,13 +665,11 @@ class RosterEngine:
             )
         )
 
-
         player = (
             player_ref
             .get()
             .to_dict()
         )
-
 
         old_team = (
             player[
@@ -744,13 +677,11 @@ class RosterEngine:
             ]
         )
 
-
         old_group = (
             player[
                 "position_group"
             ]
         )
-
 
         self.init_team(
             new_team,
@@ -758,7 +689,6 @@ class RosterEngine:
                 "league"
             ],
         )
-
 
         # ----------------------------------------------------
         # Remove from old team
@@ -772,14 +702,12 @@ class RosterEngine:
             .get()
         )
 
-
         if old_team_doc.exists:
 
             old_team_data = (
                 old_team_doc
                 .to_dict()
             )
-
 
             old_groups = (
                 old_team_data
@@ -788,7 +716,6 @@ class RosterEngine:
                     {},
                 )
             )
-
 
             if (
                 old_group
@@ -805,7 +732,6 @@ class RosterEngine:
                     )
                 )
 
-
                 old_groups[
                     old_group
                 ][
@@ -819,7 +745,6 @@ class RosterEngine:
                     real_player_key
                 ]
 
-
             self._team_ref(
                 old_team
             ).update({
@@ -830,7 +755,6 @@ class RosterEngine:
                 "updated_at":
                     _now_iso(),
             })
-
 
         # ----------------------------------------------------
         # Add to new team
@@ -845,7 +769,6 @@ class RosterEngine:
             .to_dict()
             or {}
         )
-
 
         new_groups = (
             new_team_doc.get(
@@ -864,7 +787,6 @@ class RosterEngine:
             )
         )
 
-
         if (
             old_group
             in new_groups
@@ -880,7 +802,6 @@ class RosterEngine:
                 )
             )
 
-
             if (
                 real_player_key
                 not in new_players
@@ -890,13 +811,11 @@ class RosterEngine:
                     real_player_key
                 )
 
-
             new_groups[
                 old_group
             ][
                 "players"
             ] = new_players
-
 
         self._team_ref(
             new_team
@@ -908,11 +827,6 @@ class RosterEngine:
             "updated_at":
                 _now_iso(),
         })
-
-
-        # ----------------------------------------------------
-        # Update player
-        # ----------------------------------------------------
 
         player_ref.update({
 
@@ -926,11 +840,6 @@ class RosterEngine:
                 _now_iso(),
         })
 
-
-        # ----------------------------------------------------
-        # Recalculate both teams
-        # ----------------------------------------------------
-
         self._recalculate_team_adjustment(
             old_team
         )
@@ -938,11 +847,6 @@ class RosterEngine:
         self._recalculate_team_adjustment(
             new_team
         )
-
-
-        # ----------------------------------------------------
-        # Log move
-        # ----------------------------------------------------
 
         move_record = {
 
@@ -978,13 +882,11 @@ class RosterEngine:
                 _now_iso(),
         }
 
-
         db.collection(
             MOVES_COLLECTION
         ).add(
             move_record
         )
-
 
         return {
 
@@ -1004,7 +906,29 @@ class RosterEngine:
 
 
     # ========================================================
+    # Public recalculation hook
+    #
+    # Used by player_events after an entire team has been
+    # synchronized.
+    # ========================================================
+
+    def recalculate_team_adjustment(
+        self,
+        team_name: str,
+    ):
+
+        return (
+            self._recalculate_team_adjustment(
+                team_name
+            )
+        )
+
+
+    # ========================================================
     # Recalculate Team Adjustment
+    #
+    # Player documents are fetched in one batched Firestore
+    # get_all call rather than one network request per player.
     # ========================================================
 
     def _recalculate_team_adjustment(
@@ -1018,21 +942,17 @@ class RosterEngine:
             )
         )
 
-
         team_doc = (
             team_ref.get()
         )
-
 
         if not team_doc.exists:
 
             return
 
-
         team_data = (
             team_doc.to_dict()
         )
-
 
         groups = (
             team_data.get(
@@ -1041,11 +961,119 @@ class RosterEngine:
             )
         )
 
+        # ----------------------------------------------------
+        # Collect all unique player IDs used by this team.
+        # ----------------------------------------------------
+
+        all_player_ids = []
+
+        for group_name in POSITION_GROUPS:
+
+            group_data = (
+                groups.get(
+                    group_name,
+                    {},
+                )
+            )
+
+            for pid in (
+                group_data.get(
+                    "players",
+                    [],
+                )
+            ):
+
+                if (
+                    pid
+                    and
+                    pid not in all_player_ids
+                ):
+
+                    all_player_ids.append(
+                        pid
+                    )
+
+        # ----------------------------------------------------
+        # Fetch player documents in one batch.
+        # ----------------------------------------------------
+
+        score_lookup = {}
+
+        if all_player_ids:
+
+            refs = [
+                self._player_ref(
+                    pid
+                )
+                for pid
+                in all_player_ids
+            ]
+
+            try:
+
+                player_docs = (
+                    db.get_all(
+                        refs
+                    )
+                )
+
+                for player_doc in player_docs:
+
+                    if not player_doc.exists:
+
+                        continue
+
+                    player_data = (
+                        player_doc.to_dict()
+                        or {}
+                    )
+
+                    score_lookup[
+                        player_doc.id
+                    ] = float(
+                        player_data.get(
+                            "impact_score",
+                            50.0,
+                        )
+                    )
+
+            except Exception as exc:
+
+                logger.warning(
+                    (
+                        "Batched roster player read failed "
+                        "for %s; falling back to individual reads: %s"
+                    ),
+                    team_name,
+                    exc,
+                )
+
+                for pid in all_player_ids:
+
+                    player_doc = (
+                        self
+                        ._player_ref(
+                            pid
+                        )
+                        .get()
+                    )
+
+                    if player_doc.exists:
+
+                        score_lookup[
+                            pid
+                        ] = float(
+                            player_doc
+                            .to_dict()
+                            .get(
+                                "impact_score",
+                                50.0,
+                            )
+                        )
 
         weighted_delta = (
             0.0
         )
-
 
         for (
             group_name,
@@ -1062,7 +1090,6 @@ class RosterEngine:
                 )
             )
 
-
             player_ids = (
                 group_data.get(
                     "players",
@@ -1070,34 +1097,15 @@ class RosterEngine:
                 )
             )
 
-
-            scores = []
-
-
-            for pid in player_ids:
-
-                player_doc = (
-                    self
-                    ._player_ref(
-                        pid
-                    )
-                    .get()
-                )
-
-
-                if player_doc.exists:
-
-                    scores.append(
-                        float(
-                            player_doc
-                            .to_dict()
-                            .get(
-                                "impact_score",
-                                50.0,
-                            )
-                        )
-                    )
-
+            scores = [
+                score_lookup[
+                    pid
+                ]
+                for pid
+                in player_ids
+                if pid
+                in score_lookup
+            ]
 
             avg_score = (
                 sum(
@@ -1112,7 +1120,6 @@ class RosterEngine:
                 50.0
             )
 
-
             group_data[
                 "rating"
             ] = round(
@@ -1120,11 +1127,9 @@ class RosterEngine:
                 1,
             )
 
-
             groups[
                 group_name
             ] = group_data
-
 
             weighted_delta += (
                 (
@@ -1137,7 +1142,6 @@ class RosterEngine:
                     "weight"
                 ]
             )
-
 
         team_ref.update({
 
@@ -1155,6 +1159,19 @@ class RosterEngine:
             "updated_at":
                 _now_iso(),
         })
+
+        logger.info(
+            (
+                "Roster adjustment recalculated for %s: %.3f"
+            ),
+            team_name,
+            round(
+                weighted_delta
+                *
+                0.1,
+                3,
+            ),
+        )
 
 
     # ========================================================
@@ -1174,11 +1191,9 @@ class RosterEngine:
             .get()
         )
 
-
         if not doc.exists:
 
             return None
-
 
         return (
             doc
@@ -1207,16 +1222,13 @@ class RosterEngine:
             .get()
         )
 
-
         if not doc.exists:
 
             return None
 
-
         team = (
             doc.to_dict()
         )
-
 
         groups = (
             team.get(
@@ -1225,14 +1237,12 @@ class RosterEngine:
             )
         )
 
-
         for (
             group_name,
             group_data,
         ) in groups.items():
 
             enriched = []
-
 
             for pid in (
                 group_data.get(
@@ -1249,14 +1259,12 @@ class RosterEngine:
                     .get()
                 )
 
-
                 if player_doc.exists:
 
                     p = (
                         player_doc
                         .to_dict()
                     )
-
 
                     enriched.append({
 
@@ -1285,30 +1293,19 @@ class RosterEngine:
                             ),
                     })
 
-
             group_data[
                 "player_details"
             ] = enriched
-
 
         team[
             "groups"
         ] = groups
 
-
         return team
 
 
     # ========================================================
-    # NEW:
     # Position Group Breakdown
-    #
-    # Returns the actual model contribution from each group.
-    #
-    # contribution_points =
-    #   (group_rating - 50) * position_weight * 0.1
-    #
-    # This is mathematically consistent with roster_adjustment.
     # ========================================================
 
     def get_position_group_breakdown(
@@ -1322,11 +1319,9 @@ class RosterEngine:
             )
         )
 
-
         if not profile:
 
             return {}
-
 
         groups = (
             profile.get(
@@ -1335,9 +1330,7 @@ class RosterEngine:
             )
         )
 
-
         breakdown = {}
-
 
         for (
             group_name,
@@ -1351,7 +1344,6 @@ class RosterEngine:
                 )
             )
 
-
             rating = float(
                 group_data.get(
                     "rating",
@@ -1360,13 +1352,11 @@ class RosterEngine:
                 or 50.0
             )
 
-
             weight = float(
                 group_info[
                     "weight"
                 ]
             )
-
 
             contribution_points = (
                 (
@@ -1380,7 +1370,6 @@ class RosterEngine:
                 0.1
             )
 
-
             players = (
                 group_data.get(
                     "player_details",
@@ -1388,8 +1377,6 @@ class RosterEngine:
                 )
             )
 
-
-            # Top players in group
             sorted_players = sorted(
                 players,
                 key=lambda p:
@@ -1402,7 +1389,6 @@ class RosterEngine:
                     ),
                 reverse=True,
             )
-
 
             top_players = [
                 {
@@ -1431,7 +1417,6 @@ class RosterEngine:
                     :3
                 ]
             ]
-
 
             breakdown[
                 group_name
@@ -1483,16 +1468,11 @@ class RosterEngine:
                     top_players,
             }
 
-
         return breakdown
 
 
     # ========================================================
-    # NEW:
     # Compare two teams by position group
-    #
-    # Positive point_edge = HOME advantage
-    # Negative point_edge = AWAY advantage
     # ========================================================
 
     def compare_position_groups(
@@ -1507,16 +1487,13 @@ class RosterEngine:
             )
         )
 
-
         away_breakdown = (
             self.get_position_group_breakdown(
                 away_team
             )
         )
 
-
         comparisons = []
-
 
         for (
             group_name,
@@ -1530,14 +1507,12 @@ class RosterEngine:
                 )
             )
 
-
             away_group = (
                 away_breakdown.get(
                     group_name,
                     {},
                 )
             )
-
 
             home_rating = float(
                 home_group.get(
@@ -1547,7 +1522,6 @@ class RosterEngine:
                 or 50.0
             )
 
-
             away_rating = float(
                 away_group.get(
                     "rating",
@@ -1556,20 +1530,17 @@ class RosterEngine:
                 or 50.0
             )
 
-
             weight = float(
                 group_info[
                     "weight"
                 ]
             )
 
-
             rating_gap = (
                 home_rating
                 -
                 away_rating
             )
-
 
             point_edge = (
                 rating_gap
@@ -1578,7 +1549,6 @@ class RosterEngine:
                 *
                 0.1
             )
-
 
             if point_edge > 0:
 
@@ -1597,7 +1567,6 @@ class RosterEngine:
                 favored_team = (
                     None
                 )
-
 
             comparisons.append({
 
@@ -1667,8 +1636,6 @@ class RosterEngine:
                     ),
             })
 
-
-        # Largest matchup advantages first
         comparisons.sort(
             key=lambda item:
                 abs(
@@ -1679,16 +1646,11 @@ class RosterEngine:
             reverse=True,
         )
 
-
         return comparisons
 
 
     # ========================================================
-    # NEW:
     # High-value explanation factors
-    #
-    # Returns the most meaningful position-group edges in a
-    # frontend-friendly structure.
     # ========================================================
 
     def get_matchup_explanation_factors(
@@ -1706,9 +1668,7 @@ class RosterEngine:
             )
         )
 
-
         factors = []
-
 
         for item in comparisons:
 
@@ -1720,7 +1680,6 @@ class RosterEngine:
                 or 0
             )
 
-
             if (
                 abs(
                     point_edge
@@ -1731,18 +1690,15 @@ class RosterEngine:
 
                 continue
 
-
             favored_team = (
                 item.get(
                     "favored_team"
                 )
             )
 
-
             if not favored_team:
 
                 continue
-
 
             group_name = (
                 item[
@@ -1750,13 +1706,11 @@ class RosterEngine:
                 ]
             )
 
-
             label = (
                 item[
                     "label"
                 ]
             )
-
 
             home_rating = (
                 item[
@@ -1764,17 +1718,11 @@ class RosterEngine:
                 ]
             )
 
-
             away_rating = (
                 item[
                     "away_rating"
                 ]
             )
-
-
-            # ------------------------------------------------
-            # Friendly factor name
-            # ------------------------------------------------
 
             if group_name == "QB":
 
@@ -1818,15 +1766,9 @@ class RosterEngine:
                     f"{label} Advantage"
                 )
 
-
-            # ------------------------------------------------
-            # Impact level
-            # ------------------------------------------------
-
             abs_edge = abs(
                 point_edge
             )
-
 
             if abs_edge >= 1.5:
 
@@ -1845,11 +1787,6 @@ class RosterEngine:
                 impact = (
                     "low"
                 )
-
-
-            # ------------------------------------------------
-            # Which top players belong to favored side?
-            # ------------------------------------------------
 
             if (
                 favored_team
@@ -1873,7 +1810,6 @@ class RosterEngine:
                     )
                 )
 
-
             player_names = [
                 p.get(
                     "name"
@@ -1885,18 +1821,12 @@ class RosterEngine:
                 )
             ]
 
-
-            # ------------------------------------------------
-            # Explanation sentence
-            # ------------------------------------------------
-
             detail = (
                 f"{favored_team} grades higher at "
                 f"{label.lower()} "
                 f"({home_team} {home_rating:.1f} vs "
                 f"{away_team} {away_rating:.1f})."
             )
-
 
             if player_names:
 
@@ -1912,7 +1842,6 @@ class RosterEngine:
                     "."
                 )
 
-
             factors.append({
 
                 "label":
@@ -1924,8 +1853,6 @@ class RosterEngine:
                 "team":
                     favored_team,
 
-                # Positive display number representing
-                # magnitude of advantage for favored team.
                 "points":
                     round(
                         abs(
@@ -1934,9 +1861,6 @@ class RosterEngine:
                         2,
                     ),
 
-                # Signed value remains available for math.
-                # Positive = home advantage
-                # Negative = away advantage
                 "signed_points":
                     round(
                         point_edge,
@@ -1959,7 +1883,6 @@ class RosterEngine:
                     top_players,
             })
 
-
             if (
                 len(
                     factors
@@ -1969,7 +1892,6 @@ class RosterEngine:
             ):
 
                 break
-
 
         return factors
 
@@ -1990,9 +1912,7 @@ class RosterEngine:
             .stream()
         )
 
-
         teams = []
-
 
         for doc in docs:
 
@@ -2000,17 +1920,14 @@ class RosterEngine:
                 doc.to_dict()
             )
 
-
             data.pop(
                 "groups",
                 None,
             )
 
-
             teams.append(
                 data
             )
-
 
         return teams
 
@@ -2042,7 +1959,6 @@ class RosterEngine:
             .stream()
         )
 
-
         return [
             {
                 **doc.to_dict(),
@@ -2070,7 +1986,6 @@ class RosterEngine:
             )
         )
 
-
         if team:
 
             docs = (
@@ -2089,7 +2004,6 @@ class RosterEngine:
                 query.stream()
             )
 
-
         players = [
             {
                 **doc.to_dict(),
@@ -2099,7 +2013,6 @@ class RosterEngine:
             for doc
             in docs
         ]
-
 
         return sorted(
             players,
@@ -2125,11 +2038,9 @@ class RosterEngine:
             query.lower()
         )
 
-
         players = (
             self.get_all_players()
         )
-
 
         return [
             player
@@ -2175,7 +2086,6 @@ class RosterEngine:
             .stream()
         )
 
-
         players = list(
             db
             .collection(
@@ -2183,7 +2093,6 @@ class RosterEngine:
             )
             .stream()
         )
-
 
         moves = list(
             db
@@ -2193,11 +2102,9 @@ class RosterEngine:
             .stream()
         )
 
-
         last_updated = (
             None
         )
-
 
         for doc in teams:
 
@@ -2208,7 +2115,6 @@ class RosterEngine:
                     "updated_at"
                 )
             )
-
 
             if (
                 updated
@@ -2226,7 +2132,6 @@ class RosterEngine:
                 last_updated = (
                     updated
                 )
-
 
         return {
 
