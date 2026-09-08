@@ -3779,6 +3779,90 @@ async def sync_roster_moves(
 # ============================================================
 # Injury Routes
 # ============================================================
+@app.get("/debug/raw-nfl-depth-chart")
+async def debug_raw_nfl_depth_chart():
+    """
+    TEMPORARY DEBUG ENDPOINT.
+
+    Tests likely ESPN NFL depth-chart endpoints for one team.
+    Read-only. Does not touch Firestore.
+    """
+
+    import httpx
+
+    team_id = "2"  # Buffalo Bills
+
+    urls = [
+        (
+            "site_depthchart",
+            (
+                "https://site.api.espn.com/apis/site/v2/"
+                f"sports/football/nfl/teams/{team_id}/depthchart"
+            ),
+        ),
+        (
+            "site_depthcharts",
+            (
+                "https://site.api.espn.com/apis/site/v2/"
+                f"sports/football/nfl/teams/{team_id}/depthcharts"
+            ),
+        ),
+        (
+            "core_depthcharts",
+            (
+                "https://sports.core.api.espn.com/v2/"
+                f"sports/football/leagues/nfl/seasons/2026/"
+                f"teams/{team_id}/depthcharts"
+            ),
+        ),
+    ]
+
+    results = {}
+
+    async with httpx.AsyncClient(timeout=20) as client:
+
+        for label, url in urls:
+
+            try:
+
+                response = await client.get(url)
+
+                parsed = None
+
+                try:
+                    parsed = response.json()
+                except Exception:
+                    pass
+
+                results[label] = {
+                    "url": url,
+                    "status_code": response.status_code,
+                    "top_level_keys": (
+                        list(parsed.keys())
+                        if isinstance(parsed, dict)
+                        else None
+                    ),
+                    "json": parsed,
+                    "body_preview": (
+                        response.text[:3000]
+                        if response.text
+                        else ""
+                    ),
+                }
+
+            except Exception as exc:
+
+                results[label] = {
+                    "url": url,
+                    "error": str(exc),
+                }
+
+    return {
+        "success": True,
+        "team_id": team_id,
+        "results": results,
+    }
+
 @app.get("/debug/raw-nfl-roster-player")
 async def debug_raw_nfl_roster_player():
     """
