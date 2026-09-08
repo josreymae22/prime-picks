@@ -3780,6 +3780,185 @@ async def sync_roster_moves(
 # Injury Routes
 # ============================================================
 
+@app.get("/debug/raw-nfl-injury")
+async def debug_raw_nfl_injury():
+    """
+    TEMPORARY DEBUG ENDPOINT.
+
+    Returns one raw NFL injury group and one raw injury record
+    directly from ESPN so we can inspect the current response
+    structure without modifying injury data, Firestore, roster
+    data, or predictions.
+
+    Remove this endpoint after the ESPN parsing issue is fixed.
+    """
+
+    import httpx
+
+    url = (
+        "https://site.api.espn.com/apis/site/v2/"
+        "sports/football/nfl/injuries"
+    )
+
+    try:
+
+        async with httpx.AsyncClient(
+            timeout=15
+        ) as client:
+
+            response = (
+                await client.get(
+                    url
+                )
+            )
+
+        if (
+            response.status_code
+            != 200
+        ):
+
+            return {
+                "success":
+                    False,
+
+                "status_code":
+                    response.status_code,
+
+                "message":
+                    (
+                        "ESPN injury endpoint "
+                        "returned an error"
+                    ),
+            }
+
+        data = (
+            response.json()
+        )
+
+        injury_groups = (
+            data.get(
+                "injuries",
+                [],
+            )
+            or []
+        )
+
+        # ----------------------------------------------------
+        # No injury groups returned
+        # ----------------------------------------------------
+
+        if not injury_groups:
+
+            return {
+                "success":
+                    False,
+
+                "message":
+                    (
+                        "No entries found in "
+                        "ESPN injuries array"
+                    ),
+
+                "top_level_keys":
+                    list(
+                        data.keys()
+                    ),
+
+                "raw_sample":
+                    data,
+            }
+
+        # ----------------------------------------------------
+        # Inspect first group
+        # ----------------------------------------------------
+
+        first_group = (
+            injury_groups[0]
+        )
+
+        records = (
+            first_group.get(
+                "injuries",
+                [],
+            )
+            or []
+        )
+
+        first_injury = (
+            records[0]
+            if records
+            else None
+        )
+
+        # ----------------------------------------------------
+        # Return diagnostic information only
+        # ----------------------------------------------------
+
+        return {
+            "success":
+                True,
+
+            "espn_url":
+                url,
+
+            "top_level_keys":
+                list(
+                    data.keys()
+                ),
+
+            "injury_group_count":
+                len(
+                    injury_groups
+                ),
+
+            "group_keys":
+                (
+                    list(
+                        first_group.keys()
+                    )
+                    if isinstance(
+                        first_group,
+                        dict,
+                    )
+                    else []
+                ),
+
+            "raw_group":
+                first_group,
+
+            "first_injury":
+                first_injury,
+
+            "first_injury_keys":
+                (
+                    list(
+                        first_injury.keys()
+                    )
+                    if isinstance(
+                        first_injury,
+                        dict,
+                    )
+                    else []
+                ),
+        }
+
+    except Exception as exc:
+
+        logger.exception(
+            "Raw ESPN NFL injury debug failed."
+        )
+
+        return {
+            "success":
+                False,
+
+            "error":
+                str(
+                    exc
+                ),
+        }
+
+
 @app.get("/injuries/{league}")
 async def get_injuries(
     league: str,
