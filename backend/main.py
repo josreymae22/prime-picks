@@ -3779,7 +3779,108 @@ async def sync_roster_moves(
 # ============================================================
 # Injury Routes
 # ============================================================
+@app.get("/debug/raw-nfl-roster-player")
+async def debug_raw_nfl_roster_player():
+    """
+    TEMPORARY DEBUG ENDPOINT.
 
+    Reads one successful ESPN NFL roster and returns the raw
+    group structure + first several players so we can determine
+    whether ESPN exposes starter/depth-order information.
+
+    Does NOT read or write Firestore.
+    """
+
+    import httpx
+
+    # Buffalo Bills — known working ESPN roster endpoint
+    team_id = "2"
+
+    url = (
+        "https://site.api.espn.com/apis/site/v2/"
+        f"sports/football/nfl/teams/{team_id}/roster"
+    )
+
+    try:
+
+        async with httpx.AsyncClient(
+            timeout=20
+        ) as client:
+
+            response = await client.get(
+                url
+            )
+
+        if response.status_code != 200:
+
+            return {
+                "success": False,
+                "status_code": response.status_code,
+                "body": response.text[:2000],
+            }
+
+        data = response.json()
+
+        athlete_groups = (
+            data.get(
+                "athletes",
+                [],
+            )
+            or []
+        )
+
+        groups = []
+
+        for athlete_group in athlete_groups:
+
+            items = (
+                athlete_group.get(
+                    "items",
+                    [],
+                )
+                or []
+            )
+
+            groups.append({
+                "group_keys":
+                    list(
+                        athlete_group.keys()
+                    ),
+
+                "group_name":
+                    (
+                        athlete_group.get("position")
+                        or
+                        athlete_group.get("name")
+                        or
+                        athlete_group.get("displayName")
+                    ),
+
+                "player_count":
+                    len(items),
+
+                "sample_players":
+                    items[:5],
+            })
+
+        return {
+            "success": True,
+            "team_id": team_id,
+            "top_level_keys": list(
+                data.keys()
+            ),
+            "group_count": len(
+                athlete_groups
+            ),
+            "groups": groups[:4],
+        }
+
+    except Exception as exc:
+
+        return {
+            "success": False,
+            "error": str(exc),
+        }  
 @app.get("/debug/raw-nfl-injury")
 async def debug_raw_nfl_injury():
     """
