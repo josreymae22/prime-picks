@@ -34,6 +34,7 @@ import logging
 import math
 import asyncio
 import time
+import httpx
 
 from typing import Optional
 from datetime import datetime, timezone
@@ -72,6 +73,1019 @@ CARD_CACHE_STALE_SECONDS = 6 * 60 * 60
 
 _CARD_CACHE: dict[str, dict] = {}
 _CARD_CACHE_LOCKS: dict[str, asyncio.Lock] = {}
+
+
+# ============================================================
+# Dynamic NFL roster/injury adjustment cache
+# ============================================================
+
+NFL_DYNAMIC_ADJ_TTL_SECONDS = 15 * 60
+
+_NFL_TEAM_ID_CACHE: dict[str, str] = {}
+_NFL_TEAM_ID_CACHE_STORED_AT: float = 0.0
+_NFL_DYNAMIC_TEAM_CACHE: dict[str, dict] = {}
+
+
+def _normalize_team_name(
+    value: str,
+) -> str:
+    return (
+        str(value or "")
+        .strip()
+        .lower()
+        .replace("&", "and")
+    )
+
+
+async def _get_nfl_team_id_map() -> dict[str, str]:
+    global _NFL_TEAM_ID_CACHE
+    global _NFL_TEAM_ID_CACHE_STORED_AT
+
+    now = time.monotonic()
+
+    if (
+        _NFL_TEAM_ID_CACHE
+        and
+        (
+            now
+            -
+            _NFL_TEAM_ID_CACHE_STORED_AT
+        )
+        <=
+        NFL_DYNAMIC_ADJ_TTL_SECONDS
+    ):
+        return _NFL_TEAM_ID_CACHE
+
+    url = (
+        "https://site.api.espn.com/apis/site/v2/sports/"
+        "football/nfl/teams?limit=100"
+    )
+
+    async with httpx.AsyncClient(
+        timeout=20.0
+    ) as client:
+        response = await client.get(
+            url
+        )
+
+    response.raise_for_status()
+
+    data = response.json()
+
+    mapping = {}
+
+    sports = (
+        data.get(
+            "sports",
+            [],
+        )
+        or []
+    )
+
+    for sport in sports:
+        for league in (
+            sport.get(
+                "leagues",
+                [],
+            )
+            or []
+        ):
+            for team_entry in (
+                league.get(
+                    "teams",
+                    [],
+                )
+                or []
+            ):
+                team = (
+                    team_entry.get(
+                        "team",
+                        {},
+                    )
+                    or {}
+                )
+
+                team_id = str(
+                    team.get(
+                        "id",
+                        "",
+                    )
+                    or ""
+                ).strip()
+
+                if not team_id:
+                    continue
+
+                names = {
+                    team.get(
+                        "displayName"
+                    ),
+                    team.get(
+                        "shortDisplayName"
+                    ),
+                    team.get(
+                        "name"
+                    ),
+                    (
+                        f"{team.get('location', '')} "
+                        f"{team.get('name', '')}"
+                    ).strip(),
+                }
+
+                for name in names:
+                    normalized = (
+                        _normalize_team_name(
+                            name
+                        )
+                    )
+
+                    if normalized:
+                        mapping[
+                            normalized
+                        ] = team_id
+
+    _NFL_TEAM_ID_CACHE = mapping
+    _NFL_TEAM_ID_CACHE_STORED_AT = now
+
+    return mapping
+
+
+def _dynamic_position_group(
+    abbreviation: str,
+    position_name: str = "",
+    position_key: str = "",
+) -> Optional[str]:
+
+    values = {
+        str(
+            abbreviation
+            or ""
+        )
+        .upper()
+        .strip(),
+
+        str(
+            position_key
+            or ""
+        )
+        .upper()
+        .strip(),
+    }
+
+    name = str(
+        position_name
+        or ""
+    ).upper()
+
+    if values & {"QB"}:
+        return "QB"
+
+    if values & {
+        "RB", "HB", "FB",
+        "LHB", "RHB",
+    }:
+        return "RB"
+
+    if (
+        values
+        &
+        {
+            "WR", "LWR", "RWR",
+            "SWR", "FL", "SE",
+        }
+        or
+        "WIDE RECEIVER"
+        in name
+    ):
+        return "WR"
+
+    if values & {
+        "TE", "LTE", "RTE",
+    }:
+        return "TE"
+
+    if (
+        values
+        &
+        {
+            "OL", "OT", "OG", "G", "T", "C",
+            "LT", "RT", "LG", "RG",
+        }
+        or
+        any(
+            token
+            in name
+            for token
+            in (
+                "OFFENSIVE TACKLE",
+                "OFFENSIVE GUARD",
+                "CENTER",
+                "OFFENSIVE LINE",
+            )
+        )
+    ):
+        return "OL"
+
+    if (
+        values
+        &
+        {
+            "DL", "DE", "DT", "NT",
+            "LDE", "RDE",
+        }
+        or
+        any(
+            token
+            in name
+            for token
+            in (
+                "DEFENSIVE END",
+                "DEFENSIVE TACKLE",
+                "NOSE TACKLE",
+                "DEFENSIVE LINE",
+            )
+        )
+    ):
+        return "DL"
+
+    if (
+        values
+        &
+        {
+            "LB", "OLB", "ILB", "MLB",
+            "LOLB", "ROLB", "WLB", "SLB",
+        }
+        or
+        "LINEBACKER"
+        in name
+    ):
+        return "LB"
+
+    if (
+        values
+        &
+        {
+            "CB", "LCB", "RCB", "NB", "DB",
+        }
+        or
+        "CORNERBACK"
+        in name
+    ):
+        return "CB"
+
+    if (
+        values
+        &
+        {
+            "S", "SS", "FS",
+        }
+        or
+        "SAFETY"
+        in name
+    ):
+        return "S"
+
+    if values & {
+        "K", "P", "PK", "LS",
+    }:
+        return "K"
+
+    return None
+
+
+async def _get_dynamic_nfl_team_adjustment(
+    team_name: str,
+) -> dict:
+    """
+    Production-safe NFL roster + injury calculation.
+
+    Uses ESPN depth-chart data in memory and the current injury
+    snapshot. Does not read or write Firestore.
+    """
+
+    cache_key = (
+        _normalize_team_name(
+            team_name
+        )
+    )
+
+    cached = (
+        _NFL_DYNAMIC_TEAM_CACHE.get(
+            cache_key
+        )
+    )
+
+    if cached:
+        age = (
+            time.monotonic()
+            -
+            cached[
+                "stored_at"
+            ]
+        )
+
+        if (
+            age
+            <=
+            NFL_DYNAMIC_ADJ_TTL_SECONDS
+        ):
+            return cached[
+                "data"
+            ]
+
+    team_id_map = (
+        await _get_nfl_team_id_map()
+    )
+
+    team_id = (
+        team_id_map.get(
+            cache_key
+        )
+    )
+
+    if not team_id:
+        raise ValueError(
+            f"Could not resolve ESPN team ID for {team_name}"
+        )
+
+    url = (
+        "https://site.api.espn.com/apis/site/v2/sports/"
+        f"football/nfl/teams/{team_id}/depthcharts"
+    )
+
+    async with httpx.AsyncClient(
+        timeout=25.0
+    ) as client:
+        response = await client.get(
+            url
+        )
+
+    response.raise_for_status()
+
+    data = response.json()
+
+    athlete_map = {}
+
+    for formation in (
+        data.get(
+            "depthchart",
+            [],
+        )
+        or []
+    ):
+        if not isinstance(
+            formation,
+            dict,
+        ):
+            continue
+
+        positions = (
+            formation.get(
+                "positions",
+                {},
+            )
+            or {}
+        )
+
+        if not isinstance(
+            positions,
+            dict,
+        ):
+            continue
+
+        for (
+            position_key,
+            position_data,
+        ) in positions.items():
+
+            if not isinstance(
+                position_data,
+                dict,
+            ):
+                continue
+
+            position_info = (
+                position_data.get(
+                    "position",
+                    {},
+                )
+                or {}
+            )
+
+            position_name = (
+                position_info.get(
+                    "displayName"
+                )
+                or
+                position_info.get(
+                    "name"
+                )
+                or
+                position_key
+            )
+
+            abbreviation = (
+                position_info.get(
+                    "abbreviation"
+                )
+                or
+                position_key
+            )
+
+            model_group = (
+                _dynamic_position_group(
+                    abbreviation,
+                    position_name,
+                    position_key,
+                )
+            )
+
+            if (
+                model_group
+                is None
+            ):
+                continue
+
+            athletes = (
+                position_data.get(
+                    "athletes",
+                    [],
+                )
+                or []
+            )
+
+            if not isinstance(
+                athletes,
+                list,
+            ):
+                continue
+
+            for (
+                array_index,
+                entry,
+            ) in enumerate(
+                athletes
+            ):
+
+                if not isinstance(
+                    entry,
+                    dict,
+                ):
+                    continue
+
+                wrapped = (
+                    entry.get(
+                        "athlete"
+                    )
+                )
+
+                athlete = (
+                    wrapped
+                    if isinstance(
+                        wrapped,
+                        dict,
+                    )
+                    else entry
+                )
+
+                athlete_id = str(
+                    athlete.get(
+                        "id",
+                        "",
+                    )
+                    or ""
+                ).strip()
+
+                if not athlete_id:
+                    continue
+
+                name = (
+                    athlete.get(
+                        "displayName"
+                    )
+                    or
+                    athlete.get(
+                        "fullName"
+                    )
+                    or
+                    athlete.get(
+                        "shortName"
+                    )
+                    or
+                    ""
+                )
+
+                starter_candidate = (
+                    array_index
+                    ==
+                    0
+                )
+
+                existing = (
+                    athlete_map.get(
+                        athlete_id
+                    )
+                )
+
+                if existing is None:
+                    existing = {
+                        "player_id":
+                            f"espn_nfl_{athlete_id}",
+
+                        "name":
+                            name,
+
+                        "position_group":
+                            model_group,
+
+                        "starter_candidate":
+                            starter_candidate,
+
+                        "best_array_position":
+                            array_index
+                            +
+                            1,
+
+                        "group_counts":
+                            {
+                                model_group:
+                                    1
+                            },
+                    }
+
+                    athlete_map[
+                        athlete_id
+                    ] = existing
+
+                else:
+                    existing[
+                        "starter_candidate"
+                    ] = (
+                        bool(
+                            existing.get(
+                                "starter_candidate"
+                            )
+                        )
+                        or
+                        starter_candidate
+                    )
+
+                    existing[
+                        "best_array_position"
+                    ] = min(
+                        int(
+                            existing.get(
+                                "best_array_position",
+                                array_index + 1,
+                            )
+                            or
+                            array_index + 1
+                        ),
+                        array_index
+                        +
+                        1,
+                    )
+
+                    group_counts = (
+                        existing.setdefault(
+                            "group_counts",
+                            {},
+                        )
+                    )
+
+                    group_counts[
+                        model_group
+                    ] = (
+                        group_counts.get(
+                            model_group,
+                            0,
+                        )
+                        +
+                        1
+                    )
+
+    players = []
+
+    for athlete in (
+        athlete_map.values()
+    ):
+        group_counts = (
+            athlete.get(
+                "group_counts",
+                {},
+            )
+            or {}
+        )
+
+        if group_counts:
+            position_group = max(
+                group_counts,
+                key=group_counts.get,
+            )
+        else:
+            position_group = (
+                athlete.get(
+                    "position_group"
+                )
+            )
+
+        starter = bool(
+            athlete.get(
+                "starter_candidate"
+            )
+        )
+
+        players.append({
+            "player_id":
+                athlete.get(
+                    "player_id"
+                ),
+
+            "name":
+                athlete.get(
+                    "name"
+                ),
+
+            "position_group":
+                position_group,
+
+            "impact_score":
+                (
+                    65.0
+                    if starter
+                    else 40.0
+                ),
+
+            "role":
+                (
+                    "starter"
+                    if starter
+                    else "backup"
+                ),
+
+            "depth_order":
+                athlete.get(
+                    "best_array_position"
+                ),
+        })
+
+    from roster_engine import (
+        POSITION_GROUPS
+    )
+
+    group_scores = {
+        group:
+            []
+
+        for group
+        in POSITION_GROUPS
+    }
+
+    for player in players:
+        group = (
+            player.get(
+                "position_group"
+            )
+        )
+
+        if (
+            group
+            in group_scores
+        ):
+            group_scores[
+                group
+            ].append(
+                float(
+                    player.get(
+                        "impact_score",
+                        50.0,
+                    )
+                    or 50.0
+                )
+            )
+
+    group_ratings = {}
+    roster_adjustment = 0.0
+
+    for (
+        group,
+        info,
+    ) in POSITION_GROUPS.items():
+
+        scores = (
+            group_scores[
+                group
+            ]
+        )
+
+        rating = (
+            sum(
+                scores
+            )
+            /
+            len(
+                scores
+            )
+            if scores
+            else 50.0
+        )
+
+        contribution = (
+            (
+                rating
+                -
+                50.0
+            )
+            *
+            float(
+                info[
+                    "weight"
+                ]
+            )
+            *
+            0.1
+        )
+
+        roster_adjustment += (
+            contribution
+        )
+
+        group_ratings[
+            group
+        ] = {
+            "rating":
+                round(
+                    rating,
+                    2,
+                ),
+
+            "player_count":
+                len(
+                    scores
+                ),
+
+            "weight":
+                float(
+                    info[
+                        "weight"
+                    ]
+                ),
+
+            "contribution_points":
+                round(
+                    contribution,
+                    3,
+                ),
+        }
+
+    injury_result = (
+        injury_engine
+        .calculate_injury_adjustment_from_players(
+            team_name=team_name,
+            league="NFL",
+            team_players=players,
+        )
+    )
+
+    result = {
+        "team_id":
+            team_id,
+
+        "players":
+            players,
+
+        "group_ratings":
+            group_ratings,
+
+        "roster_adjustment":
+            round(
+                roster_adjustment,
+                3,
+            ),
+
+        "injury_adjustment":
+            round(
+                float(
+                    injury_result.get(
+                        "adjustment",
+                        0.0,
+                    )
+                    or 0.0
+                ),
+                3,
+            ),
+
+        "affected_players":
+            injury_result.get(
+                "affected_players",
+                [],
+            ),
+
+        "depth_chart_cascades":
+            injury_result.get(
+                "depth_chart_cascades",
+                [],
+            ),
+
+        "source":
+            "espn_dynamic_depth_chart",
+
+        "firestore_read":
+            False,
+
+        "firestore_write":
+            False,
+    }
+
+    _NFL_DYNAMIC_TEAM_CACHE[
+        cache_key
+    ] = {
+        "stored_at":
+            time.monotonic(),
+
+        "data":
+            result,
+    }
+
+    return result
+
+
+def _dynamic_roster_factors(
+    home_team: str,
+    away_team: str,
+    home_groups: dict,
+    away_groups: dict,
+    minimum_points: float = 0.05,
+    limit: int = 5,
+) -> list[dict]:
+
+    factors = []
+
+    labels = {
+        "QB":
+            "QB Advantage",
+
+        "RB":
+            "Running Back Advantage",
+
+        "WR":
+            "Receiving Corps",
+
+        "TE":
+            "Tight End Advantage",
+
+        "OL":
+            "Offensive Line",
+
+        "DL":
+            "Defensive Front",
+
+        "LB":
+            "Linebacker Advantage",
+
+        "CB":
+            "Secondary",
+
+        "S":
+            "Safety Advantage",
+
+        "K":
+            "Kicking",
+    }
+
+    from roster_engine import (
+        POSITION_GROUPS
+    )
+
+    for (
+        group,
+        info,
+    ) in POSITION_GROUPS.items():
+
+        home_rating = float(
+            (
+                home_groups.get(
+                    group,
+                    {},
+                )
+                or {}
+            ).get(
+                "rating",
+                50.0,
+            )
+            or 50.0
+        )
+
+        away_rating = float(
+            (
+                away_groups.get(
+                    group,
+                    {},
+                )
+                or {}
+            ).get(
+                "rating",
+                50.0,
+            )
+            or 50.0
+        )
+
+        signed_points = (
+            (
+                home_rating
+                -
+                away_rating
+            )
+            *
+            float(
+                info[
+                    "weight"
+                ]
+            )
+            *
+            0.1
+        )
+
+        if (
+            abs(
+                signed_points
+            )
+            <
+            minimum_points
+        ):
+            continue
+
+        favored = (
+            home_team
+            if signed_points > 0
+            else away_team
+        )
+
+        magnitude = abs(
+            signed_points
+        )
+
+        factors.append({
+            "label":
+                labels.get(
+                    group,
+                    f"{group} Advantage",
+                ),
+
+            "team":
+                favored,
+
+            "points":
+                round(
+                    magnitude,
+                    2,
+                ),
+
+            "signed_points":
+                round(
+                    signed_points,
+                    2,
+                ),
+
+            "impact":
+                _factor_impact(
+                    magnitude
+                ),
+
+            "detail":
+                (
+                    f"{favored} grades higher at {group} "
+                    f"({home_team} {home_rating:.1f} vs "
+                    f"{away_team} {away_rating:.1f})."
+                ),
+
+            "source":
+                "espn_dynamic_roster",
+
+            "group":
+                group,
+
+            "top_players":
+                [],
+        })
+
+    factors.sort(
+        key=lambda item:
+            abs(
+                _safe_float(
+                    item.get(
+                        "points",
+                        0,
+                    )
+                )
+            ),
+        reverse=True,
+    )
+
+    return factors[
+        :limit
+    ]
+
 
 
 def _card_cache_key(
@@ -934,7 +1948,7 @@ def predict_cfb_fallback(
 # Adjustments
 # ============================================================
 
-def apply_all_adjustments(
+async def apply_all_adjustments(
     features: dict,
     home_team: str,
     away_team: str,
@@ -956,52 +1970,228 @@ def apply_all_adjustments(
         "home_cascades": [],
         "away_cascades": [],
 
+        "dynamic_roster_factors": [],
+
+        "adjustment_source":
+            "legacy",
+
         "movement": {},
     }
 
-    home_roster_adj = (
-        roster_engine.get_team_adjustment(
-            home_team
-        )
-        or 0.0
+    league_upper = (
+        league.upper()
     )
 
-    away_roster_adj = (
-        roster_engine.get_team_adjustment(
-            away_team
-        )
-        or 0.0
-    )
+    if (
+        league_upper
+        ==
+        "NFL"
+    ):
+        try:
+            (
+                home_dynamic,
+                away_dynamic,
+            ) = await asyncio.gather(
+                _get_dynamic_nfl_team_adjustment(
+                    home_team
+                ),
+                _get_dynamic_nfl_team_adjustment(
+                    away_team
+                ),
+            )
 
-    home_inj = (
-        injury_engine.get_injury_adjustment(
-            home_team,
-            league,
-            roster_engine,
-        )
-    )
+            home_roster_adj = float(
+                home_dynamic.get(
+                    "roster_adjustment",
+                    0.0,
+                )
+                or 0.0
+            )
 
-    away_inj = (
-        injury_engine.get_injury_adjustment(
-            away_team,
-            league,
-            roster_engine,
-        )
-    )
+            away_roster_adj = float(
+                away_dynamic.get(
+                    "roster_adjustment",
+                    0.0,
+                )
+                or 0.0
+            )
 
-    home_injury_adj = (
-        home_inj.get(
-            "adjustment",
-            0.0,
-        )
-    )
+            home_injury_adj = float(
+                home_dynamic.get(
+                    "injury_adjustment",
+                    0.0,
+                )
+                or 0.0
+            )
 
-    away_injury_adj = (
-        away_inj.get(
-            "adjustment",
-            0.0,
+            away_injury_adj = float(
+                away_dynamic.get(
+                    "injury_adjustment",
+                    0.0,
+                )
+                or 0.0
+            )
+
+            home_inj = {
+                "affected_players":
+                    home_dynamic.get(
+                        "affected_players",
+                        [],
+                    ),
+
+                "depth_chart_cascades":
+                    home_dynamic.get(
+                        "depth_chart_cascades",
+                        [],
+                    ),
+            }
+
+            away_inj = {
+                "affected_players":
+                    away_dynamic.get(
+                        "affected_players",
+                        [],
+                    ),
+
+                "depth_chart_cascades":
+                    away_dynamic.get(
+                        "depth_chart_cascades",
+                        [],
+                    ),
+            }
+
+            summary[
+                "dynamic_roster_factors"
+            ] = (
+                _dynamic_roster_factors(
+                    home_team,
+                    away_team,
+                    home_dynamic.get(
+                        "group_ratings",
+                        {},
+                    ),
+                    away_dynamic.get(
+                        "group_ratings",
+                        {},
+                    ),
+                )
+            )
+
+            summary[
+                "adjustment_source"
+            ] = (
+                "espn_dynamic_depth_chart"
+            )
+
+        except Exception as exc:
+            logger.warning(
+                (
+                    "Dynamic NFL roster/injury adjustment failed "
+                    "for %s @ %s; falling back to current roster DB: %s"
+                ),
+                away_team,
+                home_team,
+                exc,
+            )
+
+            home_roster_adj = (
+                roster_engine.get_team_adjustment(
+                    home_team
+                )
+                or 0.0
+            )
+
+            away_roster_adj = (
+                roster_engine.get_team_adjustment(
+                    away_team
+                )
+                or 0.0
+            )
+
+            home_inj = (
+                injury_engine.get_injury_adjustment(
+                    home_team,
+                    league_upper,
+                    roster_engine,
+                )
+            )
+
+            away_inj = (
+                injury_engine.get_injury_adjustment(
+                    away_team,
+                    league_upper,
+                    roster_engine,
+                )
+            )
+
+            home_injury_adj = float(
+                home_inj.get(
+                    "adjustment",
+                    0.0,
+                )
+                or 0.0
+            )
+
+            away_injury_adj = float(
+                away_inj.get(
+                    "adjustment",
+                    0.0,
+                )
+                or 0.0
+            )
+
+            summary[
+                "adjustment_source"
+            ] = (
+                "legacy_firestore_fallback"
+            )
+
+    else:
+        home_roster_adj = (
+            roster_engine.get_team_adjustment(
+                home_team
+            )
+            or 0.0
         )
-    )
+
+        away_roster_adj = (
+            roster_engine.get_team_adjustment(
+                away_team
+            )
+            or 0.0
+        )
+
+        home_inj = (
+            injury_engine.get_injury_adjustment(
+                home_team,
+                league_upper,
+                roster_engine,
+            )
+        )
+
+        away_inj = (
+            injury_engine.get_injury_adjustment(
+                away_team,
+                league_upper,
+                roster_engine,
+            )
+        )
+
+        home_injury_adj = float(
+            home_inj.get(
+                "adjustment",
+                0.0,
+            )
+            or 0.0
+        )
+
+        away_injury_adj = float(
+            away_inj.get(
+                "adjustment",
+                0.0,
+            )
+            or 0.0
+        )
 
     movement_feats = (
         snapshotter.get_model_features(
@@ -1115,16 +2305,36 @@ def apply_all_adjustments(
 
     summary.update({
         "home_roster_adj":
-            home_roster_adj,
+            round(
+                float(
+                    home_roster_adj
+                ),
+                3,
+            ),
 
         "away_roster_adj":
-            away_roster_adj,
+            round(
+                float(
+                    away_roster_adj
+                ),
+                3,
+            ),
 
         "home_injury_adj":
-            home_injury_adj,
+            round(
+                float(
+                    home_injury_adj
+                ),
+                3,
+            ),
 
         "away_injury_adj":
-            away_injury_adj,
+            round(
+                float(
+                    away_injury_adj
+                ),
+                3,
+            ),
 
         "home_injuries":
             home_inj.get(
@@ -1932,14 +3142,23 @@ def build_play_explanation(
     try:
 
         roster_factors = (
-            roster_engine
-            .get_matchup_explanation_factors(
-                home_team,
-                away_team,
-                minimum_points=0.05,
-                limit=5,
+            adj_summary.get(
+                "dynamic_roster_factors",
+                [],
             )
+            or []
         )
+
+        if not roster_factors:
+            roster_factors = (
+                roster_engine
+                .get_matchup_explanation_factors(
+                    home_team,
+                    away_team,
+                    minimum_points=0.05,
+                    limit=5,
+                )
+            )
 
         for factor in roster_factors:
 
@@ -3177,7 +4396,7 @@ async def _generate_weekly_card_uncached(
         (
             features,
             adj_summary,
-        ) = apply_all_adjustments(
+        ) = await apply_all_adjustments(
             features,
             home,
             away,
@@ -3517,6 +4736,12 @@ async def _generate_weekly_card_uncached(
                 roster_notes,
 
             "adjustments": {
+                "source":
+                    adj_summary.get(
+                        "adjustment_source",
+                        "legacy",
+                    ),
+
                 "home_roster":
                     adj_summary[
                         "home_roster_adj"
