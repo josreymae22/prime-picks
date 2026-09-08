@@ -14,7 +14,7 @@ Status multipliers (applied to player's impact_score):
   Suspended    → 0.00
 
 Depth chart cascade:
-  If starter (impact ≥ 70) is Out/IR, their backup (impact 30-50) fills in.
+  If a starter is Out/IR, their lower-impact backup fills in.
   Net effect: group rating drops by (starter_impact - backup_impact) * group_weight
   This is the "that safety just left, their secondary is cooked" model.
 """
@@ -324,7 +324,7 @@ class InjuryEngine:
                     if athlete_id:
 
                         player_id = (
-                            f"espn_{athlete_id}"
+                            f"espn_nfl_{athlete_id}"
                         )
 
                     elif injury_record_id:
@@ -724,8 +724,43 @@ class InjuryEngine:
         league: str,
     ):
         """
-        Merge new injury data into persistent store.
+        Replace the current injury snapshot for one league.
+
+        This intentionally clears older entries for the same league
+        before writing the fresh ESPN snapshot. That prevents stale
+        malformed team keys (for example an old "-" team) from
+        surviving after the parser has been fixed.
         """
+
+        league = (
+            league.upper()
+        )
+
+        existing = (
+            self.db.get(
+                "injuries",
+                {},
+            )
+            or {}
+        )
+
+        self.db[
+            "injuries"
+        ] = {
+            key:
+                value
+
+            for (
+                key,
+                value,
+            ) in existing.items()
+
+            if not str(
+                key
+            ).startswith(
+                f"{league}:"
+            )
+        }
 
         for (
             team,
@@ -837,12 +872,48 @@ class InjuryEngine:
         roster_engine,
     ) -> dict:
         """
-        Calculate injury-adjusted team rating modifier.
+        Calculate injury adjustment using the persisted roster DB.
 
-        Returns:
-          adjustment: float
-          affected_players: list of dicts describing impact
-          depth_chart_cascades: list of starter→backup substitutions
+        This compatibility wrapper is used by the live card engine.
+        """
+
+        team_players = (
+            roster_engine.get_all_players(
+                team=team_name
+            )
+        )
+
+        return (
+            self.calculate_injury_adjustment_from_players(
+                team_name=team_name,
+                league=league,
+                team_players=team_players,
+            )
+        )
+
+
+    def calculate_injury_adjustment_from_players(
+        self,
+        team_name: str,
+        league: str,
+        team_players: list,
+    ) -> dict:
+        """
+        Calculate injury adjustment from a supplied in-memory roster.
+
+        This is useful for read-only ON-vs-OFF testing because the
+        caller can supply proposed ESPN depth-chart players without
+        reading or writing Firestore.
+
+        Expected player fields:
+          player_id
+          name
+          position_group
+          impact_score
+
+        Optional:
+          role
+          depth_order
         """
 
         injuries = (
@@ -865,39 +936,43 @@ class InjuryEngine:
                     [],
             }
 
-        # Get team's full player roster from roster_engine.
-        team_players = (
-            roster_engine.get_all_players(
-                team=team_name
-            )
-        )
-
         player_lookup = {
-            p[
-                "player_id"
-            ]:
-            p
+            str(
+                p.get(
+                    "player_id",
+                    "",
+                )
+            ):
+                p
 
             for p
             in team_players
+
+            if p.get(
+                "player_id"
+            )
         }
 
         name_lookup = {
-            p[
-                "name"
-            ].lower():
-            p
+            str(
+                p.get(
+                    "name",
+                    "",
+                )
+            ).lower():
+                p
 
             for p
             in team_players
+
+            if p.get(
+                "name"
+            )
         }
 
         affected = []
         cascades = []
-
-        total_adjustment = (
-            0.0
-        )
+        total_adjustment = 0.0
 
         from player_events import (
             POSITION_TO_GROUP
@@ -910,9 +985,10 @@ class InjuryEngine:
         for inj in injuries:
 
             status = (
-                inj[
-                    "status"
-                ]
+                inj.get(
+                    "status",
+                    "active",
+                )
             )
 
             multiplier = (
@@ -926,74 +1002,81 @@ class InjuryEngine:
                 multiplier
                 == 1.0
             ):
-
                 continue
 
-            # --------------------------------------------
-            # Find this player in roster DB.
-            # --------------------------------------------
+            injury_player_id = str(
+                inj.get(
+                    "player_id",
+                    "",
+                )
+                or ""
+            )
+
+            injury_name = str(
+                inj.get(
+                    "name",
+                    "",
+                )
+                or ""
+            )
 
             roster_player = (
                 player_lookup.get(
-                    inj[
-                        "player_id"
-                    ]
+                    injury_player_id
                 )
                 or
                 name_lookup.get(
-                    inj[
-                        "name"
-                    ].lower()
+                    injury_name.lower()
                 )
             )
 
             if not roster_player:
 
-                # Player not in our DB.
-                # Estimate impact based on position.
-
                 pos_group = (
                     POSITION_TO_GROUP.get(
-                        inj[
-                            "position"
-                        ].upper(),
+                        str(
+                            inj.get(
+                                "position",
+                                "",
+                            )
+                        ).upper(),
                         "LB",
                     )
                 )
 
-                estimated_impact = (
-                    62.0
-                )
-
                 roster_player = {
+                    "player_id":
+                        injury_player_id,
+
                     "name":
-                        inj[
-                            "name"
-                        ],
+                        injury_name,
 
                     "position_group":
                         pos_group,
 
                     "impact_score":
-                        estimated_impact,
+                        62.0,
 
                     "estimated":
                         True,
                 }
 
-            impact = (
-                roster_player[
-                    "impact_score"
-                ]
+            impact = float(
+                roster_player.get(
+                    "impact_score",
+                    50.0,
+                )
+                or 50.0
             )
 
             pos_group = (
-                roster_player[
-                    "position_group"
-                ]
+                roster_player.get(
+                    "position_group",
+                    "LB",
+                )
             )
 
-            group_weight = (
+            group_weight = float(
                 POSITION_GROUPS.get(
                     pos_group,
                     {},
@@ -1003,10 +1086,6 @@ class InjuryEngine:
                     0.1,
                 )
             )
-
-            # --------------------------------------------
-            # Calculate rating loss from this injury.
-            # --------------------------------------------
 
             effective_impact = (
                 impact
@@ -1020,26 +1099,22 @@ class InjuryEngine:
                 effective_impact
             )
 
-            # --------------------------------------------
-            # Depth chart cascade.
-            # --------------------------------------------
-
             backup = (
                 self._find_backup(
-                    team_players,
-                    pos_group,
-                    impact,
-                    inj.get(
-                        "player_id",
-                        "",
-                    ),
+                    team_players=team_players,
+                    pos_group=pos_group,
+                    starter_impact=impact,
+                    exclude_id=injury_player_id,
                 )
             )
 
             backup_impact = (
-                backup[
-                    "impact_score"
-                ]
+                float(
+                    backup.get(
+                        "impact_score",
+                        50.0,
+                    )
+                )
                 if backup
                 else
                 impact
@@ -1048,9 +1123,10 @@ class InjuryEngine:
             )
 
             backup_name = (
-                backup[
-                    "name"
-                ]
+                backup.get(
+                    "name",
+                    "Depth player",
+                )
                 if backup
                 else
                 "Depth player"
@@ -1060,9 +1136,6 @@ class InjuryEngine:
                 multiplier
                 == 0.0
             ):
-
-                # Starter is out.
-                # Backup fills in.
 
                 net_loss = (
                     (
@@ -1076,14 +1149,15 @@ class InjuryEngine:
                     0.1
                 )
 
-                cascade = {
+                cascades.append({
                     "starter_out":
-                        inj[
-                            "name"
-                        ],
+                        injury_name,
 
                     "starter_impact":
-                        impact,
+                        round(
+                            impact,
+                            1,
+                        ),
 
                     "backup_in":
                         backup_name,
@@ -1102,20 +1176,13 @@ class InjuryEngine:
                             -net_loss,
                             3,
                         ),
-                }
-
-                cascades.append(
-                    cascade
-                )
+                })
 
                 total_adjustment -= (
                     net_loss
                 )
 
             else:
-
-                # Questionable / doubtful.
-                # Partial suppression.
 
                 net_loss = (
                     impact_loss
@@ -1131,9 +1198,15 @@ class InjuryEngine:
 
             affected.append({
                 "name":
-                    inj[
-                        "name"
-                    ],
+                    injury_name,
+
+                "player_id":
+                    injury_player_id,
+
+                "matched_roster_player_id":
+                    roster_player.get(
+                        "player_id"
+                    ),
 
                 "status":
                     status,
@@ -1142,7 +1215,10 @@ class InjuryEngine:
                     pos_group,
 
                 "impact_score":
-                    impact,
+                    round(
+                        impact,
+                        1,
+                    ),
 
                 "multiplier":
                     multiplier,
@@ -1183,12 +1259,10 @@ class InjuryEngine:
         exclude_id: str,
     ) -> Optional[dict]:
         """
-        Find best available backup in same position group.
+        Find the best available lower-impact player in the same group.
 
-        Backup =
-        same group,
-        lower impact than starter,
-        not same player.
+        For proposed depth-chart scores this naturally prefers a
+        40-point backup behind a 65-point starter.
         """
 
         candidates = [
@@ -1198,25 +1272,34 @@ class InjuryEngine:
             in team_players
 
             if (
-                p[
+                p.get(
                     "position_group"
-                ]
+                )
                 ==
                 pos_group
 
                 and
-                p[
-                    "impact_score"
-                ]
+                float(
+                    p.get(
+                        "impact_score",
+                        0.0,
+                    )
+                    or 0.0
+                )
                 <
                 starter_impact
 
                 and
-                p[
-                    "player_id"
-                ]
+                str(
+                    p.get(
+                        "player_id",
+                        "",
+                    )
+                )
                 !=
-                exclude_id
+                str(
+                    exclude_id
+                )
             )
         ]
 
@@ -1227,9 +1310,13 @@ class InjuryEngine:
         return max(
             candidates,
             key=lambda p:
-                p[
-                    "impact_score"
-                ],
+                float(
+                    p.get(
+                        "impact_score",
+                        0.0,
+                    )
+                    or 0.0
+                ),
         )
 
 
