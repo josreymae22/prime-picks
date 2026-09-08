@@ -3779,20 +3779,116 @@ async def sync_roster_moves(
 # ============================================================
 # Injury Routes
 # ============================================================
-
-@app.get("/debug/nfl-depth-chart-qb/{team_id}")
-async def debug_nfl_depth_chart_qb(team_id: str):
+def _debug_depth_position_group(
+    abbreviation: str,
+    position_name: str = "",
+    position_key: str = "",
+) -> Optional[str]:
     """
-    TEMPORARY READ-ONLY DEBUG ENDPOINT.
+    Map ESPN depth-chart positions to Prime Picks position groups.
 
-    Returns the raw QB depth-chart position from ESPN so we can
-    determine whether athlete array order represents depth order.
+    Read-only debug helper. Unknown/specialized positions are skipped
+    instead of being forced into an unrelated model group.
+    """
 
-    Does NOT:
-    - read Firestore
-    - write Firestore
-    - modify impact scores
-    - affect predictions
+    values = {
+        str(abbreviation or "").upper().strip(),
+        str(position_key or "").upper().strip(),
+    }
+
+    position_name_upper = str(
+        position_name or ""
+    ).upper()
+
+    if values & {"QB"}:
+        return "QB"
+
+    if values & {
+        "RB", "HB", "FB",
+        "LHB", "RHB",
+    }:
+        return "RB"
+
+    if values & {
+        "WR", "LWR", "RWR", "SWR",
+        "FL", "SE",
+    } or "WIDE RECEIVER" in position_name_upper:
+        return "WR"
+
+    if values & {"TE", "LTE", "RTE"}:
+        return "TE"
+
+    if values & {
+        "OL", "OT", "OG", "G", "T", "C",
+        "LT", "RT", "LG", "RG",
+    } or any(
+        token in position_name_upper
+        for token in (
+            "OFFENSIVE TACKLE",
+            "OFFENSIVE GUARD",
+            "CENTER",
+            "OFFENSIVE LINE",
+        )
+    ):
+        return "OL"
+
+    if values & {
+        "DL", "DE", "DT", "NT",
+        "LDE", "RDE",
+    } or any(
+        token in position_name_upper
+        for token in (
+            "DEFENSIVE END",
+            "DEFENSIVE TACKLE",
+            "NOSE TACKLE",
+            "DEFENSIVE LINE",
+        )
+    ):
+        return "DL"
+
+    if values & {
+        "LB", "OLB", "ILB", "MLB",
+        "LOLB", "ROLB", "WLB", "SLB",
+    } or "LINEBACKER" in position_name_upper:
+        return "LB"
+
+    if values & {
+        "CB", "LCB", "RCB", "NB", "DB",
+    } or "CORNERBACK" in position_name_upper:
+        return "CB"
+
+    if values & {
+        "S", "SS", "FS",
+    } or "SAFETY" in position_name_upper:
+        return "S"
+
+    if values & {
+        "K", "P", "PK", "LS",
+    }:
+        return "K"
+
+    return None
+
+
+async def _debug_fetch_depth_scores(
+    team_id: str,
+) -> dict:
+    """
+    Fetch and parse one ESPN NFL depth chart without Firestore.
+
+    Starter rule:
+    - The first athlete in EACH ESPN depth-chart position slot is
+      treated as a starter candidate.
+    - An athlete who is first in any formation/slot remains a starter
+      even if they also appear deeper elsewhere.
+    - All other listed athletes are treated as backups.
+    - This supports multiple starters at WR/OL/DL/LB/CB because ESPN
+      exposes those as separate position slots inside each formation.
+
+    Proposed scores remain debug-only:
+    - starter = 65
+    - backup = 40
+    - unresolved = 50
     """
 
     import httpx
@@ -3802,397 +3898,765 @@ async def debug_nfl_depth_chart_qb(team_id: str):
         f"football/nfl/teams/{team_id}/depthcharts"
     )
 
-    try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.get(url)
-
-        if response.status_code != 200:
-            return {
-                "success": False,
-                "team_id": team_id,
-                "status_code": response.status_code,
-                "url": url,
-                "body": response.text[:1000],
-            }
-
-        data = response.json()
-
-        matches = []
-
-        for formation_index, formation in enumerate(
-            data.get("depthchart", []) or []
-        ):
-            if not isinstance(formation, dict):
-                continue
-
-            formation_name = (
-                formation.get("name")
-                or formation.get("displayName")
-                or formation.get("id")
-                or "unknown"
-            )
-
-            positions = formation.get("positions", {}) or {}
-
-            if not isinstance(positions, dict):
-                continue
-
-            for position_key, position_data in positions.items():
-                if not isinstance(position_data, dict):
-                    continue
-
-                position_info = position_data.get("position", {}) or {}
-
-                abbreviation = str(
-                    position_info.get("abbreviation")
-                    or position_key
-                    or ""
-                ).upper()
-
-                position_name = str(
-                    position_info.get("displayName")
-                    or position_info.get("name")
-                    or position_key
-                    or ""
-                )
-
-                is_qb = (
-                    abbreviation == "QB"
-                    or str(position_key).lower() == "qb"
-                    or "quarterback" in position_name.lower()
-                )
-
-                if not is_qb:
-                    continue
-
-                raw_athletes = position_data.get("athletes", []) or []
-
-                simplified_athletes = []
-
-                for array_index, entry in enumerate(raw_athletes):
-                    if not isinstance(entry, dict):
-                        continue
-
-                    # ESPN may return the athlete directly OR wrapped
-                    # inside {"athlete": {...}}.
-                    wrapped = entry.get("athlete")
-
-                    if isinstance(wrapped, dict):
-                        athlete = wrapped
-                        wrapper_type = "wrapped"
-                    else:
-                        athlete = entry
-                        wrapper_type = "direct"
-
-                    simplified_athletes.append({
-                        "array_index": array_index,
-                        "array_position": array_index + 1,
-                        "wrapper_type": wrapper_type,
-
-                        "id": athlete.get("id"),
-
-                        "name": (
-                            athlete.get("displayName")
-                            or athlete.get("fullName")
-                            or athlete.get("shortName")
-                        ),
-
-                        "entry_rank": entry.get("rank"),
-                        "entry_slot": entry.get("slot"),
-
-                        "athlete_rank": athlete.get("rank"),
-                        "athlete_slot": athlete.get("slot"),
-
-                        "entry_keys": list(entry.keys()),
-                        "athlete_keys": list(athlete.keys()),
-
-                        "raw_entry": entry,
-                    })
-
-                matches.append({
-                    "formation_index": formation_index,
-                    "formation": formation_name,
-                    "position_key": position_key,
-                    "position_name": position_name,
-                    "abbreviation": abbreviation,
-                    "athlete_count": len(raw_athletes),
-                    "athletes": simplified_athletes,
-                    "raw_position": position_data,
-                })
-
-        return {
-            "success": True,
-            "team_id": team_id,
-            "team": data.get("team", {}),
-            "qb_position_matches": len(matches),
-            "qb_positions": matches,
-
-            "diagnostic_only": True,
-            "firestore_write": False,
-            "prediction_effect": False,
-        }
-
-    except Exception as exc:
-        logger.exception(
-            "ESPN QB depth-chart debug failed for team %s.",
-            team_id,
+    async with httpx.AsyncClient(
+        timeout=30.0
+    ) as client:
+        response = await client.get(
+            url
         )
 
+    if response.status_code != 200:
         return {
             "success": False,
             "team_id": team_id,
             "url": url,
-            "error": str(exc),
+            "status_code": response.status_code,
+            "message": response.text[:1000],
         }
-@app.get("/debug/nfl-depth-chart/{team_id}")
-async def debug_nfl_depth_chart(team_id: str):
-    """
-    TEMPORARY READ-ONLY ESPN DEPTH-CHART PARSER.
 
-    Handles both ESPN depth-chart athlete shapes:
-    1. Direct athlete object inside athletes[]
-    2. Wrapped athlete object under entry["athlete"]
+    data = response.json()
 
-    Keeps the lowest rank seen when a player appears in multiple
-    formations. Does not read/write Firestore or affect predictions.
-    """
-
-    import httpx
-
-    url = (
-        "https://site.api.espn.com/apis/site/v2/sports/"
-        f"football/nfl/teams/{team_id}/depthcharts"
+    depthchart = (
+        data.get(
+            "depthchart",
+            [],
+        )
+        or []
     )
 
-    try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.get(url)
+    athlete_map = {}
+    position_results = []
 
-        if response.status_code != 200:
-            return {
-                "success": False,
-                "team_id": team_id,
-                "url": url,
-                "status_code": response.status_code,
-                "message": response.text[:1000],
-            }
+    for formation in depthchart:
+        if not isinstance(
+            formation,
+            dict,
+        ):
+            continue
 
-        data = response.json()
-        depthchart = data.get("depthchart", []) or []
+        formation_name = (
+            formation.get("name")
+            or formation.get("displayName")
+            or formation.get("id")
+            or "unknown"
+        )
 
-        athlete_map = {}
-        position_results = []
+        positions = (
+            formation.get(
+                "positions",
+                {},
+            )
+            or {}
+        )
 
-        for formation in depthchart:
-            if not isinstance(formation, dict):
+        if not isinstance(
+            positions,
+            dict,
+        ):
+            continue
+
+        for (
+            position_key,
+            position_data,
+        ) in positions.items():
+
+            if not isinstance(
+                position_data,
+                dict,
+            ):
                 continue
 
-            formation_name = (
-                formation.get("name")
-                or formation.get("displayName")
-                or formation.get("id")
-                or "unknown"
+            position_info = (
+                position_data.get(
+                    "position",
+                    {},
+                )
+                or {}
             )
 
-            positions = formation.get("positions", {}) or {}
-            if not isinstance(positions, dict):
+            position_name = (
+                position_info.get(
+                    "displayName"
+                )
+                or position_info.get(
+                    "name"
+                )
+                or position_key
+            )
+
+            abbreviation = (
+                position_info.get(
+                    "abbreviation"
+                )
+                or position_key
+            )
+
+            model_group = (
+                _debug_depth_position_group(
+                    abbreviation,
+                    position_name,
+                    position_key,
+                )
+            )
+
+            athletes = (
+                position_data.get(
+                    "athletes",
+                    [],
+                )
+                or []
+            )
+
+            if not isinstance(
+                athletes,
+                list,
+            ):
                 continue
 
-            for position_key, position_data in positions.items():
-                if not isinstance(position_data, dict):
+            parsed_players = []
+
+            for (
+                array_index,
+                entry,
+            ) in enumerate(
+                athletes
+            ):
+
+                if not isinstance(
+                    entry,
+                    dict,
+                ):
                     continue
 
-                position_info = position_data.get("position", {}) or {}
-
-                position_name = (
-                    position_info.get("displayName")
-                    or position_info.get("name")
-                    or position_key
+                wrapped = (
+                    entry.get(
+                        "athlete"
+                    )
                 )
 
-                position_abbreviation = (
-                    position_info.get("abbreviation")
-                    or position_key
+                athlete = (
+                    wrapped
+                    if isinstance(
+                        wrapped,
+                        dict,
+                    )
+                    else entry
                 )
 
-                athletes = position_data.get("athletes", []) or []
-                if not isinstance(athletes, list):
-                    continue
+                athlete_id = str(
+                    athlete.get(
+                        "id",
+                        "",
+                    )
+                    or ""
+                ).strip()
 
-                parsed_players = []
+                athlete_ref = str(
+                    athlete.get(
+                        "$ref",
+                        "",
+                    )
+                    or ""
+                ).strip()
 
-                for entry in athletes:
-                    if not isinstance(entry, dict):
-                        continue
-
-                    wrapped = entry.get("athlete")
-                    athlete = wrapped if isinstance(wrapped, dict) else entry
-
-                    athlete_id = str(
-                        athlete.get("id", "")
-                        or ""
-                    ).strip()
-
-                    athlete_ref = str(
-                        athlete.get("$ref", "")
-                        or ""
-                    ).strip()
-
-                    if not athlete_id and "/athletes/" in athlete_ref:
-                        athlete_id = (
-                            athlete_ref
-                            .split("/athletes/", 1)[1]
-                            .split("?", 1)[0]
-                            .split("/", 1)[0]
-                        )
-
-                    if not athlete_id:
-                        continue
-
-                    rank = entry.get("rank")
-                    if rank is None:
-                        rank = athlete.get("rank")
-
-                    try:
-                        rank = int(rank)
-                    except (TypeError, ValueError):
-                        rank = None
-
-                    slot = entry.get("slot")
-                    if slot is None:
-                        slot = athlete.get("slot")
-
-                    try:
-                        slot = int(slot)
-                    except (TypeError, ValueError):
-                        slot = None
-
-                    player_name = (
-                        athlete.get("displayName")
-                        or athlete.get("fullName")
-                        or athlete.get("shortName")
-                        or ""
+                if (
+                    not athlete_id
+                    and
+                    "/athletes/"
+                    in athlete_ref
+                ):
+                    athlete_id = (
+                        athlete_ref
+                        .split(
+                            "/athletes/",
+                            1,
+                        )[1]
+                        .split(
+                            "?",
+                            1,
+                        )[0]
+                        .split(
+                            "/",
+                            1,
+                        )[0]
                     )
 
-                    parsed = {
-                        "athlete_id": athlete_id,
-                        "player_id": f"espn_nfl_{athlete_id}",
-                        "name": player_name,
-                        "depth_rank": rank,
-                        "slot": slot,
-                        "formation": formation_name,
-                        "position_key": position_key,
-                        "position": position_name,
-                        "abbreviation": position_abbreviation,
+                if not athlete_id:
+                    continue
+
+                player_name = (
+                    athlete.get(
+                        "displayName"
+                    )
+                    or athlete.get(
+                        "fullName"
+                    )
+                    or athlete.get(
+                        "shortName"
+                    )
+                    or ""
+                )
+
+                array_position = (
+                    array_index
+                    +
+                    1
+                )
+
+                starter_candidate = (
+                    array_index
+                    ==
+                    0
+                )
+
+                parsed = {
+                    "athlete_id":
+                        athlete_id,
+
+                    "player_id":
+                        f"espn_nfl_{athlete_id}",
+
+                    "name":
+                        player_name,
+
+                    "formation":
+                        formation_name,
+
+                    "position_key":
+                        position_key,
+
+                    "position":
+                        position_name,
+
+                    "abbreviation":
+                        abbreviation,
+
+                    "model_group":
+                        model_group,
+
+                    "array_position":
+                        array_position,
+
+                    "starter_candidate":
+                        starter_candidate,
+                }
+
+                parsed_players.append(
+                    parsed
+                )
+
+                existing = (
+                    athlete_map.get(
+                        athlete_id
+                    )
+                )
+
+                if existing is None:
+                    existing = {
+                        "athlete_id":
+                            athlete_id,
+
+                        "player_id":
+                            f"espn_nfl_{athlete_id}",
+
+                        "name":
+                            player_name,
+
+                        "starter_candidate":
+                            False,
+
+                        "best_array_position":
+                            None,
+
+                        "appearances":
+                            [],
+
+                        "group_counts":
+                            {},
                     }
 
-                    parsed_players.append(parsed)
+                    athlete_map[
+                        athlete_id
+                    ] = existing
 
-                    existing = athlete_map.get(athlete_id)
+                existing[
+                    "starter_candidate"
+                ] = (
+                    bool(
+                        existing.get(
+                            "starter_candidate"
+                        )
+                    )
+                    or
+                    starter_candidate
+                )
 
-                    if existing is None:
-                        athlete_map[athlete_id] = parsed.copy()
+                current_best = (
+                    existing.get(
+                        "best_array_position"
+                    )
+                )
 
-                    else:
-                        existing_rank = existing.get("depth_rank")
+                if (
+                    current_best
+                    is None
+                    or
+                    array_position
+                    <
+                    current_best
+                ):
+                    existing[
+                        "best_array_position"
+                    ] = (
+                        array_position
+                    )
 
-                        if (
-                            rank is not None
-                            and (
-                                existing_rank is None
-                                or rank < existing_rank
-                            )
-                        ):
-                            athlete_map[athlete_id] = parsed.copy()
+                existing[
+                    "appearances"
+                ].append({
+                    "formation":
+                        formation_name,
 
-                if parsed_players:
-                    position_results.append({
-                        "formation": formation_name,
-                        "position_key": position_key,
-                        "position": position_name,
-                        "abbreviation": position_abbreviation,
-                        "players": parsed_players,
-                    })
+                    "position_key":
+                        position_key,
 
-        proposed_scores = []
+                    "position":
+                        position_name,
 
-        for athlete_id, player in athlete_map.items():
-            rank = player.get("depth_rank")
+                    "abbreviation":
+                        abbreviation,
 
-            if rank == 1:
-                role = "starter"
-                proposed_impact_score = 65.0
+                    "model_group":
+                        model_group,
 
-            elif rank is not None and rank >= 2:
-                role = "backup"
-                proposed_impact_score = 40.0
+                    "array_position":
+                        array_position,
 
-            else:
-                role = "unknown"
-                proposed_impact_score = 50.0
+                    "starter_candidate":
+                        starter_candidate,
+                })
 
-            proposed_scores.append({
-                **player,
-                "role": role,
-                "proposed_impact_score": proposed_impact_score,
-            })
+                if model_group:
+                    group_counts = (
+                        existing[
+                            "group_counts"
+                        ]
+                    )
 
-        proposed_scores.sort(
-            key=lambda player: (
-                player["depth_rank"]
-                if player["depth_rank"] is not None
-                else 999,
-                player.get("abbreviation", ""),
-                player.get("name", ""),
+                    group_counts[
+                        model_group
+                    ] = (
+                        group_counts.get(
+                            model_group,
+                            0,
+                        )
+                        +
+                        1
+                    )
+
+            if parsed_players:
+                position_results.append({
+                    "formation":
+                        formation_name,
+
+                    "position_key":
+                        position_key,
+
+                    "position":
+                        position_name,
+
+                    "abbreviation":
+                        abbreviation,
+
+                    "model_group":
+                        model_group,
+
+                    "athlete_count":
+                        len(
+                            parsed_players
+                        ),
+
+                    "players":
+                        parsed_players,
+                })
+
+    proposed_scores = []
+
+    for athlete in athlete_map.values():
+
+        group_counts = (
+            athlete.get(
+                "group_counts",
+                {},
+            )
+            or {}
+        )
+
+        model_group = None
+
+        if group_counts:
+            model_group = max(
+                group_counts,
+                key=group_counts.get,
+            )
+
+        if athlete.get(
+            "starter_candidate"
+        ):
+            role = (
+                "starter"
+            )
+
+            proposed_score = (
+                65.0
+            )
+
+        elif athlete.get(
+            "best_array_position"
+        ) is not None:
+            role = (
+                "backup"
+            )
+
+            proposed_score = (
+                40.0
+            )
+
+        else:
+            role = (
+                "unknown"
+            )
+
+            proposed_score = (
+                50.0
+            )
+
+        proposed_scores.append({
+            "athlete_id":
+                athlete[
+                    "athlete_id"
+                ],
+
+            "player_id":
+                athlete[
+                    "player_id"
+                ],
+
+            "name":
+                athlete[
+                    "name"
+                ],
+
+            "role":
+                role,
+
+            "proposed_impact_score":
+                proposed_score,
+
+            "best_array_position":
+                athlete.get(
+                    "best_array_position"
+                ),
+
+            "model_group":
+                model_group,
+
+            "appearances":
+                athlete.get(
+                    "appearances",
+                    [],
+                ),
+        })
+
+    proposed_scores.sort(
+        key=lambda player: (
+            0
+            if player[
+                "role"
+            ]
+            ==
+            "starter"
+            else
+            1
+            if player[
+                "role"
+            ]
+            ==
+            "backup"
+            else
+            2,
+
+            player.get(
+                "model_group"
+            )
+            or
+            "",
+
+            player.get(
+                "name"
+            )
+            or
+            "",
+        )
+    )
+
+    # --------------------------------------------------------
+    # Proposed Prime Picks group ratings + adjustment
+    # Uses the SAME weights/scaling as roster_engine.py.
+    # --------------------------------------------------------
+
+    group_scores = {
+        group_name:
+            []
+
+        for group_name
+        in POSITION_GROUPS
+    }
+
+    for player in proposed_scores:
+
+        model_group = (
+            player.get(
+                "model_group"
             )
         )
 
-        starters = [
-            p
-            for p in proposed_scores
-            if p["role"] == "starter"
-        ]
+        if (
+            model_group
+            in group_scores
+        ):
+            group_scores[
+                model_group
+            ].append(
+                float(
+                    player[
+                        "proposed_impact_score"
+                    ]
+                )
+            )
 
-        backups = [
-            p
-            for p in proposed_scores
-            if p["role"] == "backup"
-        ]
+    group_ratings = {}
+    weighted_delta = 0.0
 
-        unknown = [
-            p
-            for p in proposed_scores
-            if p["role"] == "unknown"
-        ]
+    for (
+        group_name,
+        group_info,
+    ) in POSITION_GROUPS.items():
 
-        return {
-            "success": True,
-            "team_id": team_id,
-            "team": data.get("team", {}),
-            "season": data.get("season", {}),
-            "status": data.get("status"),
-            "summary": {
-                "formations_found": len(depthchart),
-                "position_entries_found": len(position_results),
-                "unique_athletes": len(proposed_scores),
-                "starters": len(starters),
-                "backups": len(backups),
-                "unknown_rank": len(unknown),
-            },
-            "proposed_scoring": {
-                "starter": 65.0,
-                "backup": 40.0,
-                "unknown": 50.0,
-                "firestore_write": False,
-                "prediction_effect": False,
-                "rule": (
-                    "Lowest ESPN depth rank seen per athlete; "
-                    "rank 1 = starter, rank 2+ = backup."
+        scores = (
+            group_scores[
+                group_name
+            ]
+        )
+
+        rating = (
+            sum(
+                scores
+            )
+            /
+            len(
+                scores
+            )
+            if scores
+            else
+            50.0
+        )
+
+        contribution = (
+            (
+                rating
+                -
+                50.0
+            )
+            *
+            float(
+                group_info[
+                    "weight"
+                ]
+            )
+            *
+            0.1
+        )
+
+        weighted_delta += (
+            contribution
+        )
+
+        group_ratings[
+            group_name
+        ] = {
+            "rating":
+                round(
+                    rating,
+                    2,
                 ),
-            },
-            "players": proposed_scores,
-            "positions": position_results,
+
+            "player_count":
+                len(
+                    scores
+                ),
+
+            "weight":
+                float(
+                    group_info[
+                        "weight"
+                    ]
+                ),
+
+            "contribution_points":
+                round(
+                    contribution,
+                    3,
+                ),
         }
+
+    proposed_roster_adjustment = (
+        round(
+            weighted_delta,
+            3,
+        )
+    )
+
+    starters = [
+        player
+        for player
+        in proposed_scores
+        if player[
+            "role"
+        ]
+        ==
+        "starter"
+    ]
+
+    backups = [
+        player
+        for player
+        in proposed_scores
+        if player[
+            "role"
+        ]
+        ==
+        "backup"
+    ]
+
+    unknown = [
+        player
+        for player
+        in proposed_scores
+        if player[
+            "role"
+        ]
+        ==
+        "unknown"
+    ]
+
+    return {
+        "success":
+            True,
+
+        "team_id":
+            team_id,
+
+        "team":
+            data.get(
+                "team",
+                {},
+            ),
+
+        "season":
+            data.get(
+                "season",
+                {},
+            ),
+
+        "status":
+            data.get(
+                "status"
+            ),
+
+        "summary": {
+            "formations_found":
+                len(
+                    depthchart
+                ),
+
+            "position_entries_found":
+                len(
+                    position_results
+                ),
+
+            "unique_athletes":
+                len(
+                    proposed_scores
+                ),
+
+            "starters":
+                len(
+                    starters
+                ),
+
+            "backups":
+                len(
+                    backups
+                ),
+
+            "unknown":
+                len(
+                    unknown
+                ),
+        },
+
+        "proposed_scoring": {
+            "starter":
+                65.0,
+
+            "backup":
+                40.0,
+
+            "unknown":
+                50.0,
+
+            "starter_rule":
+                (
+                    "First athlete in each ESPN position slot; "
+                    "starter status is preserved across formations."
+                ),
+
+            "firestore_write":
+                False,
+
+            "prediction_effect":
+                False,
+        },
+
+        "proposed_roster_adjustment":
+            proposed_roster_adjustment,
+
+        "group_ratings":
+            group_ratings,
+
+        "players":
+            proposed_scores,
+
+        "positions":
+            position_results,
+    }
+
+
+@app.get("/debug/nfl-depth-chart/{team_id}")
+async def debug_nfl_depth_chart(
+    team_id: str,
+):
+    """
+    Read-only proposed depth-chart scoring for one NFL team.
+    """
+
+    try:
+        return (
+            await _debug_fetch_depth_scores(
+                team_id
+            )
+        )
 
     except Exception as exc:
         logger.exception(
@@ -4201,10 +4665,201 @@ async def debug_nfl_depth_chart(team_id: str):
         )
 
         return {
-            "success": False,
-            "team_id": team_id,
-            "url": url,
-            "error": str(exc),
+            "success":
+                False,
+
+            "team_id":
+                team_id,
+
+            "error":
+                str(
+                    exc
+                ),
+        }
+
+
+@app.get("/debug/nfl-depth-compare")
+async def debug_nfl_depth_compare(
+    home_team_id: str,
+    away_team_id: str,
+):
+    """
+    READ-ONLY proposed roster adjustment comparison.
+
+    This is the first ON-vs-OFF safety check:
+    - OFF = roster adjustment 0.0
+    - ON  = proposed ESPN depth-chart adjustment
+
+    It does not write Firestore and does not change live predictions.
+    """
+
+    try:
+        (
+            home,
+            away,
+        ) = await asyncio.gather(
+            _debug_fetch_depth_scores(
+                home_team_id
+            ),
+            _debug_fetch_depth_scores(
+                away_team_id
+            ),
+        )
+
+        if not home.get(
+            "success"
+        ):
+            return {
+                "success":
+                    False,
+
+                "side":
+                    "home",
+
+                "details":
+                    home,
+            }
+
+        if not away.get(
+            "success"
+        ):
+            return {
+                "success":
+                    False,
+
+                "side":
+                    "away",
+
+                "details":
+                    away,
+            }
+
+        home_on = float(
+            home.get(
+                "proposed_roster_adjustment",
+                0.0,
+            )
+            or 0.0
+        )
+
+        away_on = float(
+            away.get(
+                "proposed_roster_adjustment",
+                0.0,
+            )
+            or 0.0
+        )
+
+        matchup_roster_edge = (
+            home_on
+            -
+            away_on
+        )
+
+        return {
+            "success":
+                True,
+
+            "mode":
+                "read_only_depth_scoring_comparison",
+
+            "firestore_write":
+                False,
+
+            "live_prediction_effect":
+                False,
+
+            "adjustments_off": {
+                "home_roster_adjustment":
+                    0.0,
+
+                "away_roster_adjustment":
+                    0.0,
+
+                "matchup_roster_edge":
+                    0.0,
+            },
+
+            "adjustments_on": {
+                "home_roster_adjustment":
+                    round(
+                        home_on,
+                        3,
+                    ),
+
+                "away_roster_adjustment":
+                    round(
+                        away_on,
+                        3,
+                    ),
+
+                "matchup_roster_edge":
+                    round(
+                        matchup_roster_edge,
+                        3,
+                    ),
+            },
+
+            "home": {
+                "team_id":
+                    home_team_id,
+
+                "team":
+                    home.get(
+                        "team",
+                        {},
+                    ),
+
+                "summary":
+                    home.get(
+                        "summary",
+                        {},
+                    ),
+
+                "group_ratings":
+                    home.get(
+                        "group_ratings",
+                        {},
+                    ),
+            },
+
+            "away": {
+                "team_id":
+                    away_team_id,
+
+                "team":
+                    away.get(
+                        "team",
+                        {},
+                    ),
+
+                "summary":
+                    away.get(
+                        "summary",
+                        {},
+                    ),
+
+                "group_ratings":
+                    away.get(
+                        "group_ratings",
+                        {},
+                    ),
+            },
+        }
+
+    except Exception as exc:
+        logger.exception(
+            "NFL depth-chart comparison failed."
+        )
+
+        return {
+            "success":
+                False,
+
+            "error":
+                str(
+                    exc
+                ),
         }
 
 
