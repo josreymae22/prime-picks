@@ -5,19 +5,24 @@ Roster/player ingestion layer for Prime Picks.
 
 Source hierarchy:
   1. ESPN current NFL rosters (free)
-  2. Manual entries via admin panel
-  3. SportsData.io transactions (optional paid source)
-  4. MySportsFeeds transactions (optional paid source)
+  2. ESPN Core API team-athletes fallback
+  3. Manual entries via admin panel
+  4. SportsData.io transactions (optional paid source)
+  5. MySportsFeeds transactions (optional paid source)
 
 ESPN roster imports use a neutral impact score of 50 by default.
 This prevents newly imported players from affecting predictions until
 their impact scores are intentionally adjusted.
+
+Roster synchronization is optimized so team adjustment is recalculated
+once per team rather than once per player.
 """
 
 import os
 import logging
 import time
 
+from datetime import datetime
 from typing import Optional
 
 import httpx
@@ -35,6 +40,11 @@ logger = logging.getLogger(__name__)
 ESPN_BASE = (
     "https://site.api.espn.com/apis/site/v2/"
     "sports/football"
+)
+
+ESPN_CORE_BASE = (
+    "https://sports.core.api.espn.com/v2/"
+    "sports/football/leagues/nfl"
 )
 
 SPORTSDATA_KEY = os.getenv(
@@ -56,101 +66,57 @@ MSF_PASSWORD = os.getenv(
 
 POSITION_TO_GROUP = {
 
-    "QB":
-        "QB",
+    # Offense
+    "QB": "QB",
 
-    "RB":
-        "RB",
+    "RB": "RB",
+    "FB": "RB",
+    "HB": "RB",
 
-    "FB":
-        "RB",
+    "WR": "WR",
+    "FL": "WR",
+    "SE": "WR",
 
-    "HB":
-        "RB",
+    "TE": "TE",
 
-    "WR":
-        "WR",
+    "OT": "OL",
+    "OG": "OL",
+    "C": "OL",
+    "OL": "OL",
+    "G": "OL",
+    "T": "OL",
 
-    "FL":
-        "WR",
+    # Defense
+    "DE": "DL",
+    "DT": "DL",
+    "NT": "DL",
+    "DL": "DL",
 
-    "SE":
-        "WR",
+    "LB": "LB",
+    "OLB": "LB",
+    "ILB": "LB",
+    "MLB": "LB",
 
-    "TE":
-        "TE",
+    "CB": "CB",
+    "DB": "CB",
 
-    "OT":
-        "OL",
+    "S": "S",
+    "SS": "S",
+    "FS": "S",
 
-    "OG":
-        "OL",
-
-    "C":
-        "OL",
-
-    "OL":
-        "OL",
-
-    "G":
-        "OL",
-
-    "T":
-        "OL",
-
-    "DE":
-        "DL",
-
-    "DT":
-        "DL",
-
-    "NT":
-        "DL",
-
-    "DL":
-        "DL",
-
-    "LB":
-        "LB",
-
-    "OLB":
-        "LB",
-
-    "ILB":
-        "LB",
-
-    "MLB":
-        "LB",
-
-    "CB":
-        "CB",
-
-    "DB":
-        "CB",
-
-    "S":
-        "S",
-
-    "SS":
-        "S",
-
-    "FS":
-        "S",
-
-    "K":
-        "K",
-
-    "P":
-        "K",
-
-    "LS":
-        "K",
+    # Special teams
+    "K": "K",
+    "P": "K",
+    "LS": "K",
 }
 
 
 def normalize_position(
     pos: str,
 ) -> str:
+    """
+    Convert ESPN positions to Prime Picks position groups.
+    """
 
     value = (
         pos
@@ -180,10 +146,217 @@ def normalize_position(
 
 
 # ============================================================
+# ESPN helpers
+# ============================================================
+
+def _current_nfl_season() -> int:
+    """
+    Return current calendar year.
+
+    For Prime Picks' current September usage this corresponds
+    to the active NFL season year.
+    """
+
+    return (
+        datetime.utcnow()
+        .year
+    )
+
+
+def _extract_position(
+    athlete: dict,
+) -> str:
+    """
+    Handle ESPN position data whether represented as a nested
+    object, abbreviation string, or partially populated object.
+    """
+
+    position = (
+        athlete.get(
+            "position",
+            {},
+        )
+    )
+
+    if isinstance(
+        position,
+        dict,
+    ):
+
+        return str(
+            position.get(
+                "abbreviation"
+            )
+            or
+            position.get(
+                "name"
+            )
+            or
+            ""
+        ).strip()
+
+    return str(
+        position
+        or ""
+    ).strip()
+
+
+def _normalize_espn_status(
+    athlete: dict,
+) -> str:
+    """
+    Extract ESPN roster status safely.
+    """
+
+    status_data = (
+        athlete.get(
+            "status",
+            {},
+        )
+    )
+
+    if isinstance(
+        status_data,
+        dict,
+    ):
+
+        return str(
+            status_data.get(
+                "type"
+            )
+            or
+            status_data.get(
+                "name"
+            )
+            or
+            status_data.get(
+                "displayName"
+            )
+            or
+            "active"
+        )
+
+    return str(
+        status_data
+        or
+        "active"
+    )
+
+
+def _athlete_to_roster_player(
+    athlete: dict,
+) -> Optional[dict]:
+    """
+    Convert an ESPN athlete object into the common roster shape.
+
+    Returns None if ESPN did not provide enough information.
+    """
+
+    espn_id = str(
+        athlete.get(
+            "id",
+            "",
+        )
+        or ""
+    ).strip()
+
+    if not espn_id:
+
+        return None
+
+    name = str(
+        athlete.get(
+            "fullName"
+        )
+        or
+        athlete.get(
+            "displayName"
+        )
+        or
+        athlete.get(
+            "shortName"
+        )
+        or ""
+    ).strip()
+
+    if not name:
+
+        first_name = str(
+            athlete.get(
+                "firstName",
+                "",
+            )
+            or ""
+        ).strip()
+
+        last_name = str(
+            athlete.get(
+                "lastName",
+                "",
+            )
+            or ""
+        ).strip()
+
+        name = (
+            f"{first_name} {last_name}"
+        ).strip()
+
+    if not name:
+
+        return None
+
+    pos = (
+        _extract_position(
+            athlete
+        )
+    )
+
+    jersey = (
+        athlete.get(
+            "jersey",
+            "",
+        )
+        or ""
+    )
+
+    status = (
+        _normalize_espn_status(
+            athlete
+        )
+    )
+
+    return {
+
+        "player_id":
+            f"espn_nfl_{espn_id}",
+
+        "name":
+            name,
+
+        "position":
+            pos,
+
+        "position_group":
+            normalize_position(
+                pos
+            ),
+
+        "jersey":
+            jersey,
+
+        "status":
+            status,
+    }
+
+
+# ============================================================
 # ESPN team discovery
 # ============================================================
 
 async def fetch_espn_nfl_teams() -> list[dict]:
+    """
+    Retrieve the current NFL team directory from ESPN.
+    """
 
     url = (
         f"{ESPN_BASE}/nfl/teams"
@@ -231,6 +404,7 @@ async def fetch_espn_nfl_teams() -> list[dict]:
                 "sports",
                 [],
             )
+            or []
         ):
 
             for league in (
@@ -238,6 +412,7 @@ async def fetch_espn_nfl_teams() -> list[dict]:
                     "leagues",
                     [],
                 )
+                or []
             ):
 
                 for entry in (
@@ -245,6 +420,7 @@ async def fetch_espn_nfl_teams() -> list[dict]:
                         "teams",
                         [],
                     )
+                    or []
                 ):
 
                     team = (
@@ -263,7 +439,7 @@ async def fetch_espn_nfl_teams() -> list[dict]:
                         or ""
                     ).strip()
 
-                    name = (
+                    name = str(
                         team.get(
                             "displayName"
                         )
@@ -278,9 +454,10 @@ async def fetch_espn_nfl_teams() -> list[dict]:
                         or ""
                     ).strip()
 
-                    abbreviation = (
+                    abbreviation = str(
                         team.get(
-                            "abbreviation"
+                            "abbreviation",
+                            "",
                         )
                         or ""
                     ).strip()
@@ -294,6 +471,7 @@ async def fetch_espn_nfl_teams() -> list[dict]:
                         continue
 
                     teams.append({
+
                         "id":
                             team_id,
 
@@ -327,12 +505,21 @@ async def fetch_espn_nfl_teams() -> list[dict]:
 
 
 # ============================================================
-# ESPN roster fetching
+# Primary ESPN NFL roster endpoint
 # ============================================================
 
-async def fetch_espn_nfl_roster(
+async def fetch_espn_nfl_roster_primary(
     team_id: str,
 ) -> list[dict]:
+    """
+    Fetch roster from ESPN Site API.
+
+    This is the normal preferred source.
+
+    Some ESPN teams currently return HTTP 404 because ESPN's
+    internal roster assembly fails while resolving a player's
+    contract. Those failures are handled by the Core API fallback.
+    """
 
     url = (
         f"{ESPN_BASE}/nfl/"
@@ -358,8 +545,8 @@ async def fetch_espn_nfl_roster(
 
             logger.warning(
                 (
-                    "ESPN roster request for "
-                    "team %s returned HTTP %s"
+                    "ESPN primary roster request "
+                    "for team %s returned HTTP %s"
                 ),
                 team_id,
                 response.status_code,
@@ -389,114 +576,22 @@ async def fetch_espn_nfl_roster(
                 or []
             ):
 
-                espn_id = str(
-                    item.get(
-                        "id",
-                        "",
-                    )
-                    or ""
-                ).strip()
-
-                if not espn_id:
-
-                    continue
-
-                name = (
-                    item.get(
-                        "fullName"
-                    )
-                    or
-                    item.get(
-                        "displayName"
-                    )
-                    or ""
-                ).strip()
-
-                if not name:
-
-                    continue
-
-                position_data = (
-                    item.get(
-                        "position",
-                        {},
-                    )
-                    or {}
-                )
-
-                pos = str(
-                    position_data.get(
-                        "abbreviation",
-                        "",
-                    )
-                    or ""
-                ).strip()
-
-                status_data = (
-                    item.get(
-                        "status",
-                        {},
+                player = (
+                    _athlete_to_roster_player(
+                        item
                     )
                 )
 
-                if isinstance(
-                    status_data,
-                    dict,
-                ):
+                if player:
 
-                    status = (
-                        status_data.get(
-                            "type"
-                        )
-                        or
-                        status_data.get(
-                            "name"
-                        )
-                        or
-                        "active"
+                    players.append(
+                        player
                     )
-
-                else:
-
-                    status = str(
-                        status_data
-                        or
-                        "active"
-                    )
-
-                players.append({
-
-                    "player_id":
-                        (
-                            f"espn_nfl_"
-                            f"{espn_id}"
-                        ),
-
-                    "name":
-                        name,
-
-                    "position":
-                        pos,
-
-                    "position_group":
-                        normalize_position(
-                            pos
-                        ),
-
-                    "jersey":
-                        item.get(
-                            "jersey",
-                            "",
-                        ),
-
-                    "status":
-                        status,
-                })
 
         logger.info(
             (
-                "ESPN: fetched %s players "
-                "for NFL team %s"
+                "ESPN primary roster: "
+                "fetched %s players for team %s"
             ),
             len(
                 players
@@ -510,8 +605,8 @@ async def fetch_espn_nfl_roster(
 
         logger.warning(
             (
-                "ESPN roster fetch failed "
-                "for team %s: %s"
+                "ESPN primary roster fetch "
+                "failed for team %s: %s"
             ),
             team_id,
             exc,
@@ -519,6 +614,330 @@ async def fetch_espn_nfl_roster(
 
         return []
 
+
+# ============================================================
+# ESPN Core API fallback
+# ============================================================
+
+async def fetch_espn_nfl_roster_fallback(
+    team_id: str,
+    season: Optional[int] = None,
+) -> list[dict]:
+    """
+    Fetch team athletes from ESPN Core API.
+
+    Used when ESPN's normal team roster endpoint fails.
+
+    ESPN Core collection:
+      /seasons/{season}/teams/{team_id}/athletes?limit=200
+
+    Core API collections may contain either:
+      - full athlete objects
+      - entries containing a $ref to the athlete resource
+
+    This function handles both.
+    """
+
+    if season is None:
+
+        season = (
+            _current_nfl_season()
+        )
+
+    url = (
+        f"{ESPN_CORE_BASE}/"
+        f"seasons/{season}/"
+        f"teams/{team_id}/athletes"
+    )
+
+    try:
+
+        async with httpx.AsyncClient(
+            timeout=30
+        ) as client:
+
+            response = (
+                await client.get(
+                    url,
+                    params={
+                        "limit":
+                            200
+                    },
+                )
+            )
+
+            if (
+                response.status_code
+                != 200
+            ):
+
+                logger.warning(
+                    (
+                        "ESPN Core roster fallback "
+                        "for team %s returned HTTP %s"
+                    ),
+                    team_id,
+                    response.status_code,
+                )
+
+                return []
+
+            data = (
+                response.json()
+            )
+
+            items = (
+                data.get(
+                    "items",
+                    [],
+                )
+                or []
+            )
+
+            players = []
+
+            seen_ids = set()
+
+            for index, item in enumerate(
+                items,
+                start=1,
+            ):
+
+                athlete = None
+
+                # --------------------------------------------
+                # Full athlete object already embedded
+                # --------------------------------------------
+
+                if isinstance(
+                    item,
+                    dict,
+                ) and (
+                    item.get(
+                        "id"
+                    )
+                    or
+                    item.get(
+                        "fullName"
+                    )
+                    or
+                    item.get(
+                        "displayName"
+                    )
+                ):
+
+                    athlete = (
+                        item
+                    )
+
+                # --------------------------------------------
+                # ESPN Core $ref
+                # --------------------------------------------
+
+                elif isinstance(
+                    item,
+                    dict,
+                ):
+
+                    athlete_ref = str(
+                        item.get(
+                            "$ref",
+                            "",
+                        )
+                        or ""
+                    ).strip()
+
+                    if athlete_ref:
+
+                        try:
+
+                            athlete_response = (
+                                await client.get(
+                                    athlete_ref
+                                )
+                            )
+
+                            if (
+                                athlete_response.status_code
+                                ==
+                                200
+                            ):
+
+                                athlete = (
+                                    athlete_response.json()
+                                )
+
+                            else:
+
+                                logger.debug(
+                                    (
+                                        "ESPN Core athlete ref "
+                                        "returned HTTP %s: %s"
+                                    ),
+                                    athlete_response.status_code,
+                                    athlete_ref,
+                                )
+
+                        except Exception as exc:
+
+                            logger.debug(
+                                (
+                                    "ESPN Core athlete ref "
+                                    "failed for team %s "
+                                    "item %s: %s"
+                                ),
+                                team_id,
+                                index,
+                                exc,
+                            )
+
+                if not athlete:
+
+                    continue
+
+                player = (
+                    _athlete_to_roster_player(
+                        athlete
+                    )
+                )
+
+                if not player:
+
+                    continue
+
+                player_id = (
+                    player[
+                        "player_id"
+                    ]
+                )
+
+                if (
+                    player_id
+                    in seen_ids
+                ):
+
+                    continue
+
+                seen_ids.add(
+                    player_id
+                )
+
+                players.append(
+                    player
+                )
+
+        logger.info(
+            (
+                "ESPN Core fallback: "
+                "fetched %s players "
+                "for team %s season %s"
+            ),
+            len(
+                players
+            ),
+            team_id,
+            season,
+        )
+
+        return players
+
+    except Exception as exc:
+
+        logger.warning(
+            (
+                "ESPN Core roster fallback "
+                "failed for team %s: %s"
+            ),
+            team_id,
+            exc,
+        )
+
+        return []
+
+
+# ============================================================
+# Unified ESPN NFL roster fetcher
+# ============================================================
+
+async def fetch_espn_nfl_roster(
+    team_id: str,
+) -> tuple[list[dict], str]:
+    """
+    Try normal ESPN roster first.
+
+    If it fails or returns no players, automatically use ESPN Core.
+
+    Returns:
+      (players, source)
+
+    source:
+      "primary"
+      "core_fallback"
+      "unavailable"
+    """
+
+    roster = (
+        await fetch_espn_nfl_roster_primary(
+            team_id
+        )
+    )
+
+    if roster:
+
+        return (
+            roster,
+            "primary",
+        )
+
+    logger.warning(
+        (
+            "ESPN primary roster unavailable "
+            "for team %s. Trying Core fallback."
+        ),
+        team_id,
+    )
+
+    fallback_roster = (
+        await fetch_espn_nfl_roster_fallback(
+            team_id
+        )
+    )
+
+    if fallback_roster:
+
+        logger.info(
+            (
+                "ESPN Core fallback succeeded "
+                "for team %s with %s players"
+            ),
+            team_id,
+            len(
+                fallback_roster
+            ),
+        )
+
+        return (
+            fallback_roster,
+            "core_fallback",
+        )
+
+    logger.error(
+        (
+            "Both ESPN roster sources failed "
+            "for team %s"
+        ),
+        team_id,
+    )
+
+    return (
+        [],
+        "unavailable",
+    )
+
+
+# ============================================================
+# ESPN CFB roster fetching
+# ============================================================
 
 async def fetch_espn_cfb_roster(
     team_id: str,
@@ -582,7 +1001,7 @@ async def fetch_espn_cfb_roster(
 
                     continue
 
-                name = (
+                name = str(
                     item.get(
                         "fullName"
                     )
@@ -597,29 +1016,16 @@ async def fetch_espn_cfb_roster(
 
                     continue
 
-                position_data = (
-                    item.get(
-                        "position",
-                        {},
+                pos = (
+                    _extract_position(
+                        item
                     )
-                    or {}
                 )
-
-                pos = str(
-                    position_data.get(
-                        "abbreviation",
-                        "",
-                    )
-                    or ""
-                ).strip()
 
                 players.append({
 
                     "player_id":
-                        (
-                            f"espn_cfb_"
-                            f"{espn_id}"
-                        ),
+                        f"espn_cfb_{espn_id}",
 
                     "name":
                         name,
@@ -648,8 +1054,8 @@ async def fetch_espn_cfb_roster(
 
         logger.warning(
             (
-                "ESPN CFB roster fetch failed "
-                "for team %s: %s"
+                "ESPN CFB roster fetch "
+                "failed for team %s: %s"
             ),
             team_id,
             exc,
@@ -664,20 +1070,22 @@ async def fetch_espn_cfb_roster(
 
 async def sync_espn_nfl_rosters() -> dict:
     """
-    Import all current NFL players from ESPN into Firestore.
+    Import all current NFL players into Firestore.
 
-    Performance behavior:
-      - initialize each team once
-      - import all players without recalculating after each player
-      - recalculate team adjustment once after team import
+    Performance:
+      - team initialized once
+      - players imported without per-player recalculation
+      - roster adjustment recalculated once per team
 
-    Existing ESPN players:
-      - keep their current impact score
-      - update roster/team when necessary
+    ESPN source:
+      - primary Site API first
+      - Core API fallback automatically if primary fails
 
-    New ESPN players:
-      - receive neutral impact score 50
-      - are added to Firestore
+    Existing players:
+      - preserve current impact score
+
+    New players:
+      - neutral impact score 50
     """
 
     result = {
@@ -692,6 +1100,12 @@ async def sync_espn_nfl_rosters() -> dict:
             0,
 
         "teams_skipped":
+            0,
+
+        "primary_teams":
+            0,
+
+        "fallback_teams":
             0,
 
         "players_found":
@@ -734,7 +1148,7 @@ async def sync_espn_nfl_rosters() -> dict:
         return result
 
     # --------------------------------------------------------
-    # Fetch current Firestore roster once.
+    # Current Firestore players
     # --------------------------------------------------------
 
     existing_players = (
@@ -778,7 +1192,7 @@ async def sync_espn_nfl_rosters() -> dict:
     )
 
     # --------------------------------------------------------
-    # Team loop
+    # Teams
     # --------------------------------------------------------
 
     for (
@@ -820,7 +1234,10 @@ async def sync_espn_nfl_rosters() -> dict:
 
         try:
 
-            roster = (
+            (
+                roster,
+                roster_source,
+            ) = (
                 await fetch_espn_nfl_roster(
                     team_id
                 )
@@ -830,7 +1247,7 @@ async def sync_espn_nfl_rosters() -> dict:
 
                 logger.warning(
                     (
-                        "ESPN returned no players "
+                        "ESPN returned no usable roster "
                         "for %s"
                     ),
                     team_name,
@@ -845,14 +1262,30 @@ async def sync_espn_nfl_rosters() -> dict:
                 ].append(
                     (
                         f"{team_name}: "
-                        "ESPN roster empty or unavailable"
+                        "all ESPN roster sources unavailable"
                     )
                 )
 
                 continue
 
+            if (
+                roster_source
+                ==
+                "core_fallback"
+            ):
+
+                result[
+                    "fallback_teams"
+                ] += 1
+
+            else:
+
+                result[
+                    "primary_teams"
+                ] += 1
+
             # ------------------------------------------------
-            # Create team document once.
+            # Initialize team once
             # ------------------------------------------------
 
             roster_engine.init_team(
@@ -867,9 +1300,7 @@ async def sync_espn_nfl_rosters() -> dict:
             )
 
             # ------------------------------------------------
-            # Player loop.
-            #
-            # recalculate=False is critical here.
+            # Players
             # ------------------------------------------------
 
             for player in roster:
@@ -963,12 +1394,11 @@ async def sync_espn_nfl_rosters() -> dict:
 
                             notes=
                                 (
-                                    f"ESPN sync"
+                                    f"ESPN {roster_source} sync"
                                     f" | status={player['status']}"
                                     f" | jersey={player['jersey']}"
                                 ),
 
-                            # Bulk optimization
                             recalculate=
                                 False,
 
@@ -983,6 +1413,7 @@ async def sync_espn_nfl_rosters() -> dict:
                         existing_by_id[
                             player_id
                         ] = {
+
                             **existing,
 
                             "player_id":
@@ -1040,12 +1471,11 @@ async def sync_espn_nfl_rosters() -> dict:
 
                             notes=
                                 (
-                                    f"ESPN sync"
+                                    f"ESPN {roster_source} sync"
                                     f" | status={player['status']}"
                                     f" | jersey={player['jersey']}"
                                 ),
 
-                            # Bulk optimization
                             recalculate=
                                 False,
 
@@ -1093,9 +1523,7 @@ async def sync_espn_nfl_rosters() -> dict:
                     )
 
                     logger.exception(
-                        (
-                            "Error syncing player %s"
-                        ),
+                        "Error syncing player %s",
                         message,
                     )
 
@@ -1106,7 +1534,7 @@ async def sync_espn_nfl_rosters() -> dict:
                     )
 
             # ------------------------------------------------
-            # Recalculate ONCE after all players are written.
+            # Recalculate once per team
             # ------------------------------------------------
 
             try:
@@ -1149,12 +1577,14 @@ async def sync_espn_nfl_rosters() -> dict:
             logger.info(
                 (
                     "ESPN roster sync completed "
-                    "%s (%s players) in %.2fs"
+                    "%s (%s players, source=%s) "
+                    "in %.2fs"
                 ),
                 team_name,
                 len(
                     roster
                 ),
+                roster_source,
                 elapsed,
             )
 
@@ -1165,9 +1595,7 @@ async def sync_espn_nfl_rosters() -> dict:
             )
 
             logger.exception(
-                (
-                    "Error syncing team %s"
-                ),
+                "Error syncing team %s",
                 team_name,
             )
 
@@ -1183,6 +1611,8 @@ async def sync_espn_nfl_rosters() -> dict:
             "teams_found=%s, "
             "teams_synced=%s, "
             "teams_skipped=%s, "
+            "primary_teams=%s, "
+            "fallback_teams=%s, "
             "players_found=%s, "
             "players_added=%s, "
             "players_updated=%s, "
@@ -1198,6 +1628,12 @@ async def sync_espn_nfl_rosters() -> dict:
         ],
         result[
             "teams_skipped"
+        ],
+        result[
+            "primary_teams"
+        ],
+        result[
+            "fallback_teams"
         ],
         result[
             "players_found"
@@ -1542,6 +1978,7 @@ async def fetch_msf_nfl_roster_moves(
                 "transactions",
                 [],
             )
+            or []
         ):
 
             player = (
@@ -1549,6 +1986,7 @@ async def fetch_msf_nfl_roster_moves(
                     "player",
                     {},
                 )
+                or {}
             )
 
             moves.append({
@@ -1566,18 +2004,24 @@ async def fetch_msf_nfl_roster_moves(
                     ),
 
                 "from_team":
-                    transaction.get(
-                        "fromTeam",
-                        {},
+                    (
+                        transaction.get(
+                            "fromTeam",
+                            {},
+                        )
+                        or {}
                     ).get(
                         "abbreviation",
                         "",
                     ),
 
                 "to_team":
-                    transaction.get(
-                        "toTeam",
-                        {},
+                    (
+                        transaction.get(
+                            "toTeam",
+                            {},
+                        )
+                        or {}
                     ).get(
                         "abbreviation",
                         "",
@@ -1640,6 +2084,10 @@ async def ingest_player_moves(
             [],
     }
 
+    # --------------------------------------------------------
+    # ESPN
+    # --------------------------------------------------------
+
     if league == "NFL":
 
         espn_result = (
@@ -1675,6 +2123,10 @@ async def ingest_player_moves(
                 [],
             )
         )
+
+    # --------------------------------------------------------
+    # SportsData
+    # --------------------------------------------------------
 
     if SPORTSDATA_KEY:
 
@@ -1713,6 +2165,10 @@ async def ingest_player_moves(
             ].append(
                 f"SportsData error: {exc}"
             )
+
+    # --------------------------------------------------------
+    # MySportsFeeds
+    # --------------------------------------------------------
 
     elif (
         MSF_KEY
@@ -1811,6 +2267,9 @@ def get_data_source_status() -> dict:
             True,
 
         "espn_auto_sync":
+            True,
+
+        "espn_core_fallback":
             True,
 
         "active_source":
