@@ -4863,6 +4863,433 @@ async def debug_nfl_depth_compare(
         }
 
 
+
+def _debug_depth_players_for_injury(
+    depth_result: dict,
+) -> list[dict]:
+    """
+    Convert read-only ESPN depth-chart scoring output into the
+    in-memory player format expected by injury_engine.
+    """
+
+    players = []
+
+    for player in (
+        depth_result.get(
+            "players",
+            [],
+        )
+        or []
+    ):
+        model_group = player.get("model_group")
+
+        if model_group not in POSITION_GROUPS:
+            continue
+
+        players.append({
+            "player_id": player.get("player_id"),
+            "name": player.get("name"),
+            "position_group": model_group,
+            "impact_score": float(
+                player.get(
+                    "proposed_impact_score",
+                    50.0,
+                )
+                or 50.0
+            ),
+            "role": player.get(
+                "role",
+                "unknown",
+            ),
+            "depth_order": player.get(
+                "best_array_position"
+            ),
+        })
+
+    return players
+
+
+@app.get("/debug/nfl-injury-adjustment/{team_id}")
+async def debug_nfl_injury_adjustment(
+    team_id: str,
+):
+    """
+    READ-ONLY injury adjustment test using proposed ESPN
+    starter/backup impact scores.
+
+    Does not read/write Firestore and does not affect live predictions.
+    """
+
+    try:
+        depth_result = (
+            await _debug_fetch_depth_scores(
+                team_id
+            )
+        )
+
+        if not depth_result.get("success"):
+            return {
+                "success": False,
+                "stage": "depth_chart",
+                "details": depth_result,
+            }
+
+        team_data = (
+            depth_result.get(
+                "team",
+                {},
+            )
+            or {}
+        )
+
+        team_name = (
+            team_data.get("displayName")
+            or (
+                f"{team_data.get('location', '')} "
+                f"{team_data.get('name', '')}"
+            ).strip()
+        )
+
+        proposed_players = (
+            _debug_depth_players_for_injury(
+                depth_result
+            )
+        )
+
+        injuries = (
+            injury_engine.get_team_injuries(
+                team_name,
+                "NFL",
+            )
+        )
+
+        if not hasattr(
+            injury_engine,
+            "calculate_injury_adjustment_from_players",
+        ):
+            return {
+                "success": False,
+                "stage": "injury_engine",
+                "message": (
+                    "Current injury_engine.py does not expose "
+                    "calculate_injury_adjustment_from_players()."
+                ),
+            }
+
+        adjustment = (
+            injury_engine
+            .calculate_injury_adjustment_from_players(
+                team_name=team_name,
+                league="NFL",
+                team_players=proposed_players,
+            )
+        )
+
+        return {
+            "success": True,
+            "mode": "read_only_injury_adjustment",
+            "team_id": team_id,
+            "team": team_name,
+            "firestore_read": False,
+            "firestore_write": False,
+            "live_prediction_effect": False,
+            "depth_summary": depth_result.get(
+                "summary",
+                {},
+            ),
+            "proposed_player_count": len(
+                proposed_players
+            ),
+            "injury_count": len(
+                injuries
+            ),
+            "injury_adjustment": adjustment.get(
+                "adjustment",
+                0.0,
+            ),
+            "affected_players": adjustment.get(
+                "affected_players",
+                [],
+            ),
+            "depth_chart_cascades": adjustment.get(
+                "depth_chart_cascades",
+                [],
+            ),
+        }
+
+    except Exception as exc:
+        logger.exception(
+            "Read-only NFL injury adjustment test failed for team %s.",
+            team_id,
+        )
+
+        return {
+            "success": False,
+            "team_id": team_id,
+            "error": str(exc),
+        }
+
+
+@app.get("/debug/nfl-adjustments-compare")
+async def debug_nfl_adjustments_compare(
+    home_team_id: str,
+    away_team_id: str,
+):
+    """
+    FINAL READ-ONLY ON-vs-OFF safety comparison.
+
+    OFF:
+      roster = 0
+      injuries = 0
+
+    ON:
+      roster = proposed ESPN depth-chart adjustment
+      injuries = injury adjustment calculated from the same
+                 proposed in-memory player scores
+    """
+
+    try:
+        home, away = await asyncio.gather(
+            _debug_fetch_depth_scores(
+                home_team_id
+            ),
+            _debug_fetch_depth_scores(
+                away_team_id
+            ),
+        )
+
+        if not home.get("success"):
+            return {
+                "success": False,
+                "side": "home",
+                "details": home,
+            }
+
+        if not away.get("success"):
+            return {
+                "success": False,
+                "side": "away",
+                "details": away,
+            }
+
+        if not hasattr(
+            injury_engine,
+            "calculate_injury_adjustment_from_players",
+        ):
+            return {
+                "success": False,
+                "stage": "injury_engine",
+                "message": (
+                    "Current injury_engine.py does not expose "
+                    "calculate_injury_adjustment_from_players()."
+                ),
+            }
+
+        home_team_data = home.get("team", {}) or {}
+        away_team_data = away.get("team", {}) or {}
+
+        home_team_name = (
+            home_team_data.get("displayName")
+            or (
+                f"{home_team_data.get('location', '')} "
+                f"{home_team_data.get('name', '')}"
+            ).strip()
+        )
+
+        away_team_name = (
+            away_team_data.get("displayName")
+            or (
+                f"{away_team_data.get('location', '')} "
+                f"{away_team_data.get('name', '')}"
+            ).strip()
+        )
+
+        home_players = (
+            _debug_depth_players_for_injury(
+                home
+            )
+        )
+
+        away_players = (
+            _debug_depth_players_for_injury(
+                away
+            )
+        )
+
+        home_injury = (
+            injury_engine
+            .calculate_injury_adjustment_from_players(
+                team_name=home_team_name,
+                league="NFL",
+                team_players=home_players,
+            )
+        )
+
+        away_injury = (
+            injury_engine
+            .calculate_injury_adjustment_from_players(
+                team_name=away_team_name,
+                league="NFL",
+                team_players=away_players,
+            )
+        )
+
+        home_roster = float(
+            home.get(
+                "proposed_roster_adjustment",
+                0.0,
+            )
+            or 0.0
+        )
+
+        away_roster = float(
+            away.get(
+                "proposed_roster_adjustment",
+                0.0,
+            )
+            or 0.0
+        )
+
+        home_injury_value = float(
+            home_injury.get(
+                "adjustment",
+                0.0,
+            )
+            or 0.0
+        )
+
+        away_injury_value = float(
+            away_injury.get(
+                "adjustment",
+                0.0,
+            )
+            or 0.0
+        )
+
+        home_combined = (
+            home_roster
+            +
+            home_injury_value
+        )
+
+        away_combined = (
+            away_roster
+            +
+            away_injury_value
+        )
+
+        matchup_edge = (
+            home_combined
+            -
+            away_combined
+        )
+
+        return {
+            "success": True,
+            "mode": "read_only_roster_plus_injury_comparison",
+            "firestore_read": False,
+            "firestore_write": False,
+            "live_prediction_effect": False,
+
+            "adjustments_off": {
+                "home_roster": 0.0,
+                "home_injury": 0.0,
+                "home_combined": 0.0,
+                "away_roster": 0.0,
+                "away_injury": 0.0,
+                "away_combined": 0.0,
+                "matchup_edge": 0.0,
+            },
+
+            "adjustments_on": {
+                "home_roster": round(
+                    home_roster,
+                    3,
+                ),
+                "home_injury": round(
+                    home_injury_value,
+                    3,
+                ),
+                "home_combined": round(
+                    home_combined,
+                    3,
+                ),
+                "away_roster": round(
+                    away_roster,
+                    3,
+                ),
+                "away_injury": round(
+                    away_injury_value,
+                    3,
+                ),
+                "away_combined": round(
+                    away_combined,
+                    3,
+                ),
+                "matchup_edge": round(
+                    matchup_edge,
+                    3,
+                ),
+            },
+
+            "home": {
+                "team_id": home_team_id,
+                "team": home_team_name,
+                "depth_summary": home.get(
+                    "summary",
+                    {},
+                ),
+                "injury_count": len(
+                    injury_engine.get_team_injuries(
+                        home_team_name,
+                        "NFL",
+                    )
+                ),
+                "affected_players": home_injury.get(
+                    "affected_players",
+                    [],
+                ),
+                "depth_chart_cascades": home_injury.get(
+                    "depth_chart_cascades",
+                    [],
+                ),
+            },
+
+            "away": {
+                "team_id": away_team_id,
+                "team": away_team_name,
+                "depth_summary": away.get(
+                    "summary",
+                    {},
+                ),
+                "injury_count": len(
+                    injury_engine.get_team_injuries(
+                        away_team_name,
+                        "NFL",
+                    )
+                ),
+                "affected_players": away_injury.get(
+                    "affected_players",
+                    [],
+                ),
+                "depth_chart_cascades": away_injury.get(
+                    "depth_chart_cascades",
+                    [],
+                ),
+            },
+        }
+
+    except Exception as exc:
+        logger.exception(
+            "Read-only NFL roster + injury comparison failed."
+        )
+
+        return {
+            "success": False,
+            "error": str(exc),
+        }
+
+
 @app.get("/debug/raw-nfl-depth-chart")
 async def debug_raw_nfl_depth_chart():
     """
