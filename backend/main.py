@@ -4122,6 +4122,121 @@ def team_injuries(
             ],
     }
 
+@app.get("/debug/nfl-roster-endpoints")
+async def debug_nfl_roster_endpoints():
+    """
+    TEMPORARY DEBUG ENDPOINT.
+
+    Checks the raw ESPN roster responses for:
+    - Arizona Cardinals (team id 22)
+    - Chicago Bears (team id 3)
+
+    Read-only. Does not modify Firestore or roster data.
+    """
+
+    import httpx
+
+    teams = {
+        "Arizona Cardinals": "22",
+        "Chicago Bears": "3",
+    }
+
+    results = {}
+
+    async with httpx.AsyncClient(timeout=20) as client:
+
+        for team_name, team_id in teams.items():
+
+            url = (
+                "https://site.api.espn.com/apis/site/v2/"
+                f"sports/football/nfl/teams/{team_id}/roster"
+            )
+
+            try:
+
+                response = await client.get(
+                    url
+                )
+
+                body_preview = (
+                    response.text[:2000]
+                    if response.text
+                    else ""
+                )
+
+                parsed_json = None
+
+                try:
+                    parsed_json = (
+                        response.json()
+                    )
+                except Exception:
+                    pass
+
+                results[
+                    team_name
+                ] = {
+                    "team_id":
+                        team_id,
+
+                    "url":
+                        url,
+
+                    "status_code":
+                        response.status_code,
+
+                    "headers":
+                        {
+                            "content-type":
+                                response.headers.get(
+                                    "content-type"
+                                ),
+                        },
+
+                    "top_level_keys":
+                        (
+                            list(
+                                parsed_json.keys()
+                            )
+                            if isinstance(
+                                parsed_json,
+                                dict,
+                            )
+                            else None
+                        ),
+
+                    "json":
+                        parsed_json,
+
+                    "body_preview":
+                        body_preview,
+                }
+
+            except Exception as exc:
+
+                results[
+                    team_name
+                ] = {
+                    "team_id":
+                        team_id,
+
+                    "url":
+                        url,
+
+                    "error":
+                        str(
+                            exc
+                        ),
+                }
+
+    return {
+        "success":
+            True,
+
+        "results":
+            results,
+    }
+
 
 # ============================================================
 # Line Movement Routes
