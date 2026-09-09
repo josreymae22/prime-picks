@@ -6,6 +6,7 @@ const resend = new Resend(process.env.RESEND_API_KEY);
 const ADMIN_EMAILS = [
   'jay@legalauthority.io',
   'digitalhpclients@gmail.com',
+  'joseph@digitalhp.com',
 ];
 
 const APP_URL =
