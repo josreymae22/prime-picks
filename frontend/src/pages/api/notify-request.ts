@@ -7,6 +7,7 @@ const ADMIN_EMAILS = [
   'jay@legalauthority.io',
   'digitalhpclients@gmail.com',
   'joseph@digitalhp.com',
+  'steven@digitalhp.com',
 ];
 
 const APP_URL =
