@@ -40,7 +40,7 @@ export default async function handler(
 
   try {
     const result = await resend.emails.send({
-      from: 'Prime Picks <notifications@legalauthority.io>',
+      from: 'Prime Picks <notifications@primepicks.ai>',
 
       to: ADMIN_EMAILS,
 
